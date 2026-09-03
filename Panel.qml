@@ -172,7 +172,8 @@ Item {
         name: root._pendingClassName,
         createdAt: new Date().toISOString(),
         students: students,
-        incompatibilities: []
+        incompatibilities: [],
+        lastResetAt: ""
       }
       root.classes = root.classes.concat([newClass])
       root.persistClasses()
@@ -211,12 +212,32 @@ Item {
     var picks = Draw.pickThree(cls.students)
     var ids = picks.map(function(p) { return p.id })
     var updatedStudents = Draw.recordDraw(cls.students, ids, new Date().toISOString())
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities }
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt }
     root.classes = Store.replaceClass(root.classes, updatedClass)
     root.persistClasses()
     var byId = {}
     updatedStudents.forEach(function(s) { byId[s.id] = s })
     root.lastDraw = ids.map(function(id) { return byId[id] })
+  }
+
+  property bool resetDrawsConfirmOpen: false
+  function requestResetDraws() {
+    var cls = root.activeClass()
+    if (!cls || cls.students.length === 0) return
+    root.resetDrawsConfirmOpen = true
+  }
+  function cancelResetDraws() { root.resetDrawsConfirmOpen = false }
+  function confirmResetDraws() {
+    var cls = root.activeClass()
+    root.resetDrawsConfirmOpen = false
+    if (!cls) return
+    var resetStudents = cls.students.map(function(s) {
+      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: 0, drawHistory: [] }
+    })
+    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: resetStudents, incompatibilities: cls.incompatibilities, lastResetAt: new Date().toISOString() }
+    root.classes = Store.replaceClass(root.classes, updated)
+    root.persistClasses()
+    root.lastDraw = []
   }
 
   property string pathBarMode: "" // "" | "exportStats"
@@ -306,7 +327,7 @@ Item {
     var cls = root.activeClass()
     if (!cls || !ids || ids.length < 2) return
     if (cls.incompatibilities.length >= Store.MAX_INCOMPATIBILITY_SETS) return
-    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities.concat([ids]) }
+    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities.concat([ids]), lastResetAt: cls.lastResetAt }
     root.classes = Store.replaceClass(root.classes, updated)
     root.persistClasses()
   }
@@ -316,7 +337,7 @@ Item {
     if (!cls) return
     var list = cls.incompatibilities.slice()
     list.splice(index, 1)
-    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: list }
+    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: list, lastResetAt: cls.lastResetAt }
     root.classes = Store.replaceClass(root.classes, updated)
     root.persistClasses()
   }
@@ -355,6 +376,18 @@ Item {
       }
       root.appreciationResult = (appreciationOut.text || "").trim()
     }
+  }
+
+  function resetAppreciationForm() {
+    methodeField.text = ""
+    contenuField.text = ""
+    expressionField.text = ""
+    travailField.text = ""
+    comportementField.text = ""
+    axeField.text = ""
+    root.appreciationResult = ""
+    root.appreciationError = ""
+    root.appreciationCopyFeedback = ""
   }
 
   function copyAppreciation() {
@@ -400,7 +433,7 @@ Item {
         blocked: methodeField.activeFocus || contenuField.activeFocus || expressionField.activeFocus
           || travailField.activeFocus || comportementField.activeFocus || axeField.activeFocus
           || root.classSettingsOpen || root.incompatOpen || root.pathBarMode !== ""
-          || root.deleteClassPendingId !== ""
+          || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen
         onCloseRequested: root.requestClose()
 
         ScrollView {
@@ -546,6 +579,23 @@ Item {
                     accent: root.accent
                     onClicked: root.exportStats()
                   }
+                  Button {
+                    text: "♻ Réinitialiser les tirages"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: Color.urgent
+                    onClicked: root.requestResetDraws()
+                  }
+                }
+
+                Text {
+                  visible: root.activeClass() && root.activeClass().lastResetAt !== ""
+                  width: parent.width
+                  text: "Dernier reset le " + (root.activeClass() ? Qt.formatDateTime(new Date(root.activeClass().lastResetAt), "dd/MM/yyyy à HH:mm") : "")
+                  color: Color.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  textFormat: Text.PlainText
                 }
 
                 Text {
@@ -958,6 +1008,10 @@ Item {
                   Dropdown {
                     label: "Longueur max"
                     options: [
+                      { value: "100", label: "100 caractères" },
+                      { value: "120", label: "120 caractères" },
+                      { value: "140", label: "140 caractères" },
+                      { value: "160", label: "160 caractères" },
                       { value: "200", label: "200 caractères" },
                       { value: "300", label: "300 caractères" },
                       { value: "500", label: "500 caractères" },
@@ -979,6 +1033,14 @@ Item {
                     foreground: root.foreground
                     accent: root.accent
                     onClicked: root.generateAppreciation()
+                  }
+
+                  Button {
+                    text: "🆕 Nouvelle appréciation"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: root.accent
+                    onClicked: root.resetAppreciationForm()
                   }
                 }
 
@@ -1129,6 +1191,19 @@ Item {
         foreground: root.foreground
         onCanceled: root.cancelDeleteClass()
         onConfirmed: root.confirmDeleteClass()
+      }
+
+      ConfirmDialog {
+        anchors.fill: parent
+        opened: root.resetDrawsConfirmOpen
+        message: "Réinitialiser le décompte des tirages pour \"" + (root.activeClass() ? root.activeClass().name : "") + "\" ? L'historique de tous les élèves sera effacé. Cette action est irréversible."
+        cancelText: "Annuler"
+        confirmText: "Réinitialiser"
+        selectedIndex: 0
+        background: root.background
+        foreground: root.foreground
+        onCanceled: root.cancelResetDraws()
+        onConfirmed: root.confirmResetDraws()
       }
     }
   }

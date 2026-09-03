@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.gabrielharfield.ghclasses",
+  "name": "GH Classes",
+  "version": "0.1.0-beta",
+  "author": "gabrielharfield",
+  "license": "MIT",
+  "description": "Personal classroom-management tool: one tab per class, weighted random student draw (with draw-history stats export), automatic group generation (with incompatibility constraints), and an AI appreciation ('appréciation') generator. Not for the marketplace — personal tool. No bar icon — summon with: omarchy-shell shell summon io.github.gabrielharfield.ghclasses",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "Panel.qml"
+  }
+}

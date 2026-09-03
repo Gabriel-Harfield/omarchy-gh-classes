@@ -86,8 +86,24 @@ Item {
     onLoadFailed: root.classes = []
   }
 
+  // Keeps one prior generation of classes.json around as a safety net
+  // against a bad write — real per-student data (draw history, incompat
+  // sets) lives only here, with no other undo mechanism. Best-effort:
+  // the cp is skipped/fails harmlessly the very first time (nothing to
+  // back up yet), and this only protects saves made through the app
+  // itself, not the file being edited/replaced from outside it.
+  property string _pendingClassesJson: ""
+
   function persistClasses() {
-    classesFile.setText(Store.serializeClasses(root.classes))
+    root._pendingClassesJson = Store.serializeClasses(root.classes)
+    backupClassesProc.command = ["cp", "-f", "--", root.classesPath, root.classesPath + ".bak"]
+    backupClassesProc.running = false
+    backupClassesProc.running = true
+  }
+
+  Process {
+    id: backupClassesProc
+    onExited: classesFile.setText(root._pendingClassesJson)
   }
 
   // ---- persisted: settings (which class tab was last active) --------------

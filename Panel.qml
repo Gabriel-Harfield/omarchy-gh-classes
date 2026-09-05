@@ -10,6 +10,7 @@ import "lib/Draw.js" as Draw
 import "lib/Groups.js" as Groups
 import "lib/PromptBuilder.js" as PromptBuilder
 import "lib/ClaudeRunner.js" as ClaudeRunner
+import "lib/Files.js" as Files
 import "ui"
 
 // GH Classes: one tab per class, weighted-random draw, group generation
@@ -32,6 +33,7 @@ Item {
     root.closingFromHost = false
     window.visible = true
     Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
+    if (root.syncDir) root.runSync()
   }
 
   function close() {
@@ -106,9 +108,10 @@ Item {
     onExited: classesFile.setText(root._pendingClassesJson)
   }
 
-  // ---- persisted: settings (which class tab was last active) --------------
+  // ---- persisted: settings (last active class tab + sync folder) ----------
 
   property string activeClassId: ""
+  property string syncDir: "" // "" = sync disabled
 
   FileView {
     id: settingsFile
@@ -116,12 +119,107 @@ Item {
     watchChanges: false
     atomicWrites: true
     printErrors: false
-    onLoaded: root.activeClassId = Store.parseSettings(settingsFile.text()).activeClassId
-    onLoadFailed: root.activeClassId = ""
+    onLoaded: {
+      var s = Store.parseSettings(settingsFile.text())
+      root.activeClassId = s.activeClassId
+      root.syncDir = s.syncDir
+    }
+    onLoadFailed: { root.activeClassId = ""; root.syncDir = "" }
   }
 
   function persistSettings() {
-    settingsFile.setText(Store.serializeSettings({ activeClassId: root.activeClassId }))
+    settingsFile.setText(Store.serializeSettings({ activeClassId: root.activeClassId, syncDir: root.syncDir }))
+  }
+
+  function setSyncDir(dir) {
+    var clean = root.expandHome(dir).slice(0, 1024)
+    if (clean === root.syncDir) return
+    root.syncDir = clean
+    root.persistSettings()
+  }
+
+  // ---- sync settings popover ------------------------------------------------
+
+  property bool syncSettingsOpen: false
+  function openSyncSettings() { root.syncSettingsOpen = true }
+  function closeSyncSettings() { root.syncSettingsOpen = false }
+  function confirmSyncDir(dir) {
+    root.setSyncDir(dir)
+    root.syncSettingsOpen = false
+    if (root.syncDir) root.runSync()
+  }
+  function clearSyncDir() {
+    root.setSyncDir("")
+    root.syncSettingsOpen = false
+  }
+
+  // ---- classes.json sync (additive merge via a user-chosen folder) --------
+  //
+  // Same shape as GH Grilles' own criteria-bank sync (mkdir the folder,
+  // bounded-read its classes.json, merge, write the merged result to both
+  // sides — a failed write to an unreachable folder is tolerated silently
+  // since local state is already correct by then). The merge itself is
+  // Store.mergeClasses(), which — unlike Grilles' plain array union —
+  // reconciles mutable per-student draw history and respects a reset done
+  // on either machine. See that function's own header comment for the full
+  // reasoning, including the "class must be created once, then synced, not
+  // re-imported independently on each machine" limitation.
+
+  property bool syncInFlight: false
+  property string _syncPendingDir: ""
+
+  function runSync() {
+    if (!root.syncDir || root.syncInFlight) return
+    root.syncInFlight = true
+    syncInFlightTimeout.restart()
+    root._syncPendingDir = root.syncDir
+    ensureSyncDirProc.command = ["mkdir", "-p", "--", root._syncPendingDir]
+    ensureSyncDirProc.running = false
+    ensureSyncDirProc.running = true
+  }
+
+  // Quickshell's FileView exposes no onSaveFailed signal, so a write to an
+  // unreachable sync folder has no failure event to catch — this timer is
+  // the fallback that still clears syncInFlight in that case, so one bad
+  // sync folder can never permanently wedge every later sync attempt.
+  Timer {
+    id: syncInFlightTimeout
+    interval: 8000
+    repeat: false
+    onTriggered: root.syncInFlight = false
+  }
+
+  Process {
+    id: ensureSyncDirProc
+    onExited: function(exitCode) {
+      if (exitCode !== 0) { syncInFlightTimeout.stop(); root.syncInFlight = false; return }
+      var cmd = Files.readCommand(root._syncPendingDir, "classes.json", 4194304, 5)
+      if (!cmd) { syncInFlightTimeout.stop(); root.syncInFlight = false; return }
+      syncReadProc.command = cmd
+      syncReadProc.running = false
+      syncReadProc.running = true
+    }
+  }
+
+  Process {
+    id: syncReadProc
+    stdout: StdioCollector { id: syncReadOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var remoteClasses = Store.parseClasses(syncReadOut.text || "[]")
+      var merged = Store.mergeClasses(root.classes, remoteClasses)
+      root.classes = merged
+      root.persistClasses()
+      syncWriteFile.path = root._syncPendingDir + "/classes.json"
+      Qt.callLater(function() { syncWriteFile.setText(Store.serializeClasses(merged)) })
+    }
+  }
+
+  FileView {
+    id: syncWriteFile
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: { syncInFlightTimeout.stop(); root.syncInFlight = false }
   }
 
   function activeClass() {
@@ -137,6 +235,7 @@ Item {
     root.lastDraw = []
     root.lastGroups = []
     root.lastGroupsUnresolved = []
+    root.appreciationStudentId = ""
   }
 
   property string activeFeatureTab: "tirage" // tirage | groupes | appreciations | exercices
@@ -197,6 +296,7 @@ Item {
       root.persistSettings()
       root.classSettingsOpen = false
       if (classSettingsPopover) classSettingsPopover.clearDraft()
+      if (root.syncDir) root.runSync()
     }
   }
 
@@ -211,6 +311,7 @@ Item {
       root.persistSettings()
     }
     root.deleteClassPendingId = ""
+    if (root.syncDir) root.runSync()
   }
   function cancelDeleteClass() { root.deleteClassPendingId = "" }
   function pendingDeleteClassName() {
@@ -234,6 +335,7 @@ Item {
     var byId = {}
     updatedStudents.forEach(function(s) { byId[s.id] = s })
     root.lastDraw = ids.map(function(id) { return byId[id] })
+    if (root.syncDir) root.runSync()
   }
 
   property bool resetDrawsConfirmOpen: false
@@ -254,6 +356,7 @@ Item {
     root.classes = Store.replaceClass(root.classes, updated)
     root.persistClasses()
     root.lastDraw = []
+    if (root.syncDir) root.runSync()
   }
 
   property string pathBarMode: "" // "" | "exportStats"
@@ -346,6 +449,7 @@ Item {
     var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities.concat([ids]), lastResetAt: cls.lastResetAt }
     root.classes = Store.replaceClass(root.classes, updated)
     root.persistClasses()
+    if (root.syncDir) root.runSync()
   }
 
   function removeIncompatibilitySet(index) {
@@ -356,6 +460,7 @@ Item {
     var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: list, lastResetAt: cls.lastResetAt }
     root.classes = Store.replaceClass(root.classes, updated)
     root.persistClasses()
+    if (root.syncDir) root.runSync()
   }
 
   // ---- feature 3: appréciations ---------------------------------------------
@@ -366,6 +471,9 @@ Item {
   property string appreciationResult: ""
   property string appreciationError: ""
   property string appreciationCopyFeedback: ""
+  // Copie-only: which student the copied "commande" is attributed to (ex.
+  // "CATIN Mathieu : appréciation générée"). Never used for bulletin mode.
+  property string appreciationStudentId: ""
 
   function generateAppreciation() {
     var values = root.appreciationMode === "bulletin"
@@ -404,11 +512,27 @@ Item {
     root.appreciationResult = ""
     root.appreciationError = ""
     root.appreciationCopyFeedback = ""
+    root.appreciationStudentId = ""
+  }
+
+  // Empty unless mode is "copies" and the selected id still matches a
+  // student of the currently active class (guards against a stale
+  // selection surviving a class switch).
+  function selectedAppreciationStudentLabel() {
+    if (root.appreciationMode !== "copies" || !root.appreciationStudentId) return ""
+    var cls = root.activeClass()
+    if (!cls) return ""
+    for (var i = 0; i < cls.students.length; i++) {
+      if (cls.students[i].id === root.appreciationStudentId) return Store.studentLabel(cls.students[i])
+    }
+    return ""
   }
 
   function copyAppreciation() {
     if (!root.appreciationResult) return
-    appreciationCopyProc.command = ["wl-copy", root.appreciationResult]
+    var label = root.selectedAppreciationStudentLabel()
+    var text = label ? (label + " : " + root.appreciationResult) : root.appreciationResult
+    appreciationCopyProc.command = ["wl-copy", text]
     appreciationCopyProc.running = false
     appreciationCopyProc.running = true
   }
@@ -421,6 +545,17 @@ Item {
     }
   }
   Timer { id: appreciationCopyFeedbackTimer; interval: 2000; repeat: false; onTriggered: root.appreciationCopyFeedback = "" }
+
+  // Placeholder for the "ajouter à la planche d'étiquettes" button — wired
+  // up but inert until the physical label-sheet Typst template exists (see
+  // conversation with Gabriel, 2026-09-05: waiting on the Amazon sheet he's
+  // ordering to reverse-engineer its exact grid dimensions).
+  property string labelSheetFeedback: ""
+  function addAppreciationToLabelSheet() {
+    root.labelSheetFeedback = "Bientôt disponible — en attente du gabarit d'étiquettes."
+    labelSheetFeedbackTimer.restart()
+  }
+  Timer { id: labelSheetFeedbackTimer; interval: 2500; repeat: false; onTriggered: root.labelSheetFeedback = "" }
 
   // ---------------------------------------------------------------- window
 
@@ -449,7 +584,7 @@ Item {
         blocked: methodeField.activeFocus || contenuField.activeFocus || expressionField.activeFocus
           || travailField.activeFocus || comportementField.activeFocus || axeField.activeFocus
           || root.classSettingsOpen || root.incompatOpen || root.pathBarMode !== ""
-          || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen
+          || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen || root.syncSettingsOpen
         onCloseRequested: root.requestClose()
 
         ScrollView {
@@ -467,7 +602,7 @@ Item {
 
             Item {
               width: parent.width
-              height: Math.max(titleText.implicitHeight, settingsButton.implicitHeight)
+              height: Math.max(titleText.implicitHeight, settingsButton.implicitHeight, syncButton.implicitHeight)
 
               Text {
                 id: titleText
@@ -489,6 +624,19 @@ Item {
                 foreground: root.foreground
                 accent: root.accent
                 onClicked: root.openClassSettings()
+              }
+
+              Button {
+                id: syncButton
+                anchors.right: settingsButton.left
+                anchors.rightMargin: Style.spacing.controlGap
+                anchors.verticalCenter: parent.verticalCenter
+                text: "🔄 Synchro"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                tooltipText: root.syncDir !== "" ? ("Synchronisée vers : " + root.syncDir) : "Synchronisation désactivée"
+                onClicked: root.openSyncSettings()
               }
             }
 
@@ -855,6 +1003,23 @@ Item {
                   onChanged: function(value) { root.appreciationMode = value }
                 }
 
+                Dropdown {
+                  id: appreciationStudentDropdown
+                  visible: root.appreciationMode === "copies"
+                  label: "Élève (pour la copie)"
+                  options: [{ value: "", label: "— Sélectionner un élève —" }].concat(
+                    root.activeClass()
+                      ? root.activeClass().students.map(function(s) { return { value: s.id, label: Store.studentLabel(s) } })
+                      : []
+                  )
+                  value: root.appreciationStudentId
+                  foreground: root.foreground
+                  background: root.background
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  onChanged: function(value) { root.appreciationStudentId = value }
+                }
+
                 Column {
                   visible: root.appreciationMode === "copies"
                   width: parent.width
@@ -1022,6 +1187,7 @@ Item {
                   spacing: Style.spacing.huge
 
                   Dropdown {
+                    id: maxCharsDropdown
                     label: "Longueur max"
                     options: [
                       { value: "100", label: "100 caractères" },
@@ -1042,21 +1208,39 @@ Item {
                     onChanged: function(value) { root.maxCharsOption = value }
                   }
 
-                  Button {
-                    text: root.generatingAppreciation ? "Génération en cours…" : "🪄 Générer l'appréciation"
-                    bordered: true
-                    enabled: !root.generatingAppreciation
-                    foreground: root.foreground
-                    accent: root.accent
-                    onClicked: root.generateAppreciation()
+                  // Wrapped in an Item matching the dropdown's full height
+                  // (label + gap + control) and anchored to its bottom, so
+                  // this button's box lines up with the dropdown's actual
+                  // trigger control rather than its label row — a bare Flow
+                  // top-aligns mismatched-height children, which is what
+                  // made these buttons sit visibly too high before.
+                  Item {
+                    width: generateButton.implicitWidth
+                    height: maxCharsDropdown.implicitHeight
+                    Button {
+                      id: generateButton
+                      anchors.bottom: parent.bottom
+                      text: root.generatingAppreciation ? "Génération en cours…" : "🪄 Générer l'appréciation"
+                      bordered: true
+                      enabled: !root.generatingAppreciation
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.generateAppreciation()
+                    }
                   }
 
-                  Button {
-                    text: "🆕 Nouvelle appréciation"
-                    bordered: true
-                    foreground: root.foreground
-                    accent: root.accent
-                    onClicked: root.resetAppreciationForm()
+                  Item {
+                    width: newAppreciationButton.implicitWidth
+                    height: maxCharsDropdown.implicitHeight
+                    Button {
+                      id: newAppreciationButton
+                      anchors.bottom: parent.bottom
+                      text: "🆕 Nouvelle appréciation"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.resetAppreciationForm()
+                    }
                   }
                 }
 
@@ -1124,6 +1308,15 @@ Item {
                       accent: root.accent
                       onClicked: root.copyAppreciation()
                     }
+                    Button {
+                      visible: root.appreciationMode === "copies"
+                      text: "🏷 Ajouter à la planche d'étiquettes"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      tooltipText: "Bientôt disponible — en attente du gabarit d'étiquettes"
+                      onClicked: root.addAppreciationToLabelSheet()
+                    }
                     Text {
                       anchors.verticalCenter: parent.verticalCenter
                       visible: root.appreciationCopyFeedback !== ""
@@ -1132,6 +1325,16 @@ Item {
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                     }
+                  }
+
+                  Text {
+                    visible: root.labelSheetFeedback !== ""
+                    width: parent.width
+                    text: root.labelSheetFeedback
+                    color: Qt.darker(root.foreground, 1.3)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
                   }
                 }
               }
@@ -1180,6 +1383,19 @@ Item {
         onCreateRequested: function(name, path) { root.requestCreateClass(name, path) }
         onDeleteRequested: function(classId) { root.requestDeleteClass(classId) }
         onCanceled: root.closeClassSettings()
+      }
+
+      SyncSettingsPopover {
+        anchors.fill: parent
+        opened: root.syncSettingsOpen
+        currentDir: root.syncDir
+        foreground: root.foreground
+        background: root.background
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onDirConfirmed: function(dir) { root.confirmSyncDir(dir) }
+        onDirCleared: root.clearSyncDir()
+        onCanceled: root.closeSyncSettings()
       }
 
       IncompatibilityPopover {

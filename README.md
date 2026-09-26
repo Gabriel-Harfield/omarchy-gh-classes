@@ -41,6 +41,44 @@ end to end. Try that one first.
   progression), a max-length dropdown, "🪄 Générer l'appréciation" runs a
   one-shot headless `claude -p` call and shows the result with a copy
   button.
+- **📋 Eval. Compétences** — pick a student, a grille type ("Commentaire
+  EAF", the official state grid for the real bac correction, or
+  "Commentaire formatif", Gabriel's own reworded/more precise version for
+  day-to-day grading — more to come), and type the assignment's own
+  "Intitulé de l'évaluation"
+  (shared by every student evaluated on that grille/classe, not retyped
+  per student). Tick one mastery level per criterion (Non maîtrisé /
+  Insuffisamment maîtrisé / En cours de maîtrise / Maîtrisé — narrow fixed-
+  width level columns, headers wrap/hyphenate; "Critères" takes whatever
+  width is left and follows the window), plus a scrollable "Appréciation"
+  text area and a "Note / 20" field, both saved per student/grille (auto-
+  saved shortly after you stop typing). "🎯 Proposer une note" runs a
+  one-shot headless `claude -p` call that reads the ticked levels and the
+  written appréciation against a fixed barème (Maîtrisé 18-20 / En cours de
+  maîtrise 12-17 / Insuffisamment maîtrisé 7-11 / Non maîtrisé 1-6) and
+  shows a suggested grade in parentheses next to the field — never
+  auto-filled, never exported, purely an in-app hint. "🧠 Générer une
+  appréciation" (same headless-`claude -p` mechanism) writes a full
+  appréciation straight into the Appréciation field from the ticked grid
+  alone, following fixed house rules: vouvoiement, never discouraging, and
+  always méthode → contenu → expression in that order — overwrites
+  whatever was already typed there, same as regenerating on the other tab.
+  Either
+  "📋 Copier le code Typst" or "📄 Exporter en PDF" (via `typst compile`)
+  produces a standalone document: the intitulé as a header, the student's
+  name, the grille name, the filled-in grid, appréciation and note, and a
+  running footer ("_M.Harfield - <classe> - <année scolaire>_", the school
+  year computed from today's date). Grille templates are hardcoded in
+  `lib/CompetencyGrids.js`, not user-editable in the app yet. The
+  appréciation field has local, offline spellcheck (hunspell, ported from
+  GH Typst's own — no network, no Claude): misspelled words show as
+  clickable chips below the text area, each opening a suggestion menu that
+  replaces every occurrence of that word. Nothing here is ever cleared
+  automatically — a student's table/appréciation/note for a given grille
+  stays until you explicitly clear it with "🗑 Réinitialiser cet élève" or
+  "🗑 Réinitialiser la classe" (next to the export buttons, both behind a
+  confirmation, both scoped to the currently selected grille type only —
+  by design, so you can revisit and harmonize past copies at any time).
 - **📚 Exercices** — placeholder for now; deferred until the exercise
   database itself exists.
 

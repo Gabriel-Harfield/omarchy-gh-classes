@@ -42,10 +42,10 @@ end to end. Try that one first.
   one-shot headless `claude -p` call and shows the result with a copy
   button.
 - **📋 Eval. Compétences** — pick a student, a grille type ("Commentaire
-  EAF", the official state grid for the real bac correction, or
-  "Commentaire formatif", Gabriel's own reworded/more precise version for
-  day-to-day grading — more to come), and type the assignment's own
-  "Intitulé de l'évaluation"
+  EAF", the official state grid for the real bac correction, "Commentaire
+  de texte", Gabriel's own reworded/more precise version for day-to-day
+  grading, or "Introduction" for group-written introductions — more to
+  come), and type the assignment's own "Intitulé de l'évaluation"
   (shared by every student evaluated on that grille/classe, not retyped
   per student). Tick one mastery level per criterion (Non maîtrisé /
   Insuffisamment maîtrisé / En cours de maîtrise / Maîtrisé — narrow fixed-

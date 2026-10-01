@@ -20,6 +20,7 @@ Item {
   property bool opened: false
   property var grid: null // CompetencyGrids grid object ({ id, name, rows })
   property var weights: ({}) // { "<rowIndex>": points (0-10) }
+  property int total: 20 // évaluation's barème (10 or 20) — Gabriel, 2026-10-01
   property color foreground: Color.foreground
   property color background: Color.background
   property color accent: Color.accent
@@ -86,7 +87,7 @@ Item {
 
           Text {
             width: parent.width
-            text: "Chaque critère vaut le nombre de points que vous lui donnez ici, sur un total de 20. Idéalement, répartissez exactement 20 points au total. Un critère gagne : Maîtrisé = tous ses points, En cours de maîtrise = 2/3, Insuffisamment maîtrisé = 1/3, Non maîtrisé = 0. La note finale est la somme de ce que chaque critère rapporte."
+            text: "Chaque critère vaut le nombre de points que vous lui donnez ici, sur un total de " + root.total + ". Idéalement, répartissez exactement " + root.total + " points au total. Un critère gagne : Maîtrisé = tous ses points, En cours de maîtrise = 2/3, Insuffisamment maîtrisé = 1/3, Non maîtrisé = 0. La note finale est la somme de ce que chaque critère rapporte."
             color: Qt.darker(root.foreground, 1.4)
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -94,8 +95,8 @@ Item {
           }
 
           Text {
-            text: "Total distribué : " + CompetencyGrids.formatNote(root.totalDistributed()) + " / 20"
-            color: root.totalDistributed() === 20 ? root.accent : Qt.darker(root.foreground, 1.3)
+            text: "Total distribué : " + CompetencyGrids.formatNote(root.totalDistributed()) + " / " + root.total
+            color: root.totalDistributed() === root.total ? root.accent : Qt.darker(root.foreground, 1.3)
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             font.bold: true
@@ -154,7 +155,7 @@ Item {
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                enabled: root.weightFor(index) < 20
+                enabled: root.weightFor(index) < root.total
                 onClicked: root.weightChanged(index, root.weightFor(index) + 0.5)
               }
             }

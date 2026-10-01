@@ -14,13 +14,13 @@ import "lib/Files.js" as Files
 import "lib/CorrectionsStore.js" as CorrectionsStore
 import "lib/CopyMatcher.js" as CopyMatcher
 import "lib/CorrectionPromptBuilder.js" as CorrectionPromptBuilder
-import "lib/FilesCheckPromptBuilder.js" as FilesCheckPromptBuilder
 import "lib/ExerciseTypes.js" as ExerciseTypes
 import "lib/ConsignesBuilder.js" as ConsignesBuilder
 import "lib/ConsignesTemplateCommentaire.js" as TemplateCommentaire
 import "lib/CompetencyGrids.js" as CompetencyGrids
 import "lib/Spellcheck.js" as Spellcheck
 import "lib/CompetencyPromptBuilder.js" as CompetencyPromptBuilder
+import "lib/CorrectionAssistantPromptBuilder.js" as CorrectionAssistantPromptBuilder
 import "ui"
 
 // GH Classes: one tab per class, weighted-random draw, group generation
@@ -133,6 +133,11 @@ Item {
 
   property string activeClassId: ""
   property string syncDir: "" // "" = sync disabled
+  // Panel-wide UI zoom (Gabriel, 2026-10-02) — same idea as GH Typst's
+  // editor zoom, but scales the whole panel's content, not one editor
+  // pane; for when he wants bigger text/controls without touching the
+  // whole desktop's scale. See setUiZoom() and the zoomWrapper Item below.
+  property real uiZoom: 1.0
 
   FileView {
     id: settingsFile
@@ -144,12 +149,18 @@ Item {
       var s = Store.parseSettings(settingsFile.text())
       root.activeClassId = s.activeClassId
       root.syncDir = s.syncDir
+      root.uiZoom = s.uiZoom
     }
-    onLoadFailed: { root.activeClassId = ""; root.syncDir = "" }
+    onLoadFailed: { root.activeClassId = ""; root.syncDir = ""; root.uiZoom = 1.0 }
   }
 
   function persistSettings() {
-    settingsFile.setText(Store.serializeSettings({ activeClassId: root.activeClassId, syncDir: root.syncDir }))
+    settingsFile.setText(Store.serializeSettings({ activeClassId: root.activeClassId, syncDir: root.syncDir, uiZoom: root.uiZoom }))
+  }
+
+  function setUiZoom(zoom) {
+    root.uiZoom = Math.max(0.6, Math.min(2.5, Math.round(zoom * 10) / 10))
+    root.persistSettings()
   }
 
   function setSyncDir(dir) {
@@ -266,7 +277,7 @@ Item {
     root.loadEvaluationFields()
   }
 
-  property string activeFeatureTab: "tirage" // tirage | groupes | appreciations | corrections | evaluation | exercices
+  property string activeFeatureTab: "tirage" // tirage | groupes | appreciations | corrections | evaluation | assistant | exercices
 
   // ---- class creation (Paramètres) -----------------------------------------
 
@@ -317,7 +328,9 @@ Item {
         students: students,
         incompatibilities: [],
         lastResetAt: "",
-        competencyIntitules: {}
+        competencyIntitules: {},
+        competencyWeights: {},
+        competencyBaremeTotal: {}
       }
       root.classes = root.classes.concat([newClass])
       root.persistClasses()
@@ -358,7 +371,7 @@ Item {
     var picks = Draw.pickThree(cls.students)
     var ids = picks.map(function(p) { return p.id })
     var updatedStudents = Draw.recordDraw(cls.students, ids, new Date().toISOString())
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules }
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updatedClass)
     root.persistClasses()
     var byId = {}
@@ -379,9 +392,13 @@ Item {
     root.resetDrawsConfirmOpen = false
     if (!cls) return
     var resetStudents = cls.students.map(function(s) {
-      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: 0, drawHistory: [] }
+      // Bug found 2026-10-01: this used to omit competencyGrids/
+      // competencyClearedAt entirely, silently wiping every student's
+      // "Eval. Compétences" answers on a plain tirage reset — an unrelated
+      // feature. Preserved explicitly now, same as every other field here.
+      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: 0, drawHistory: [], competencyGrids: s.competencyGrids, competencyClearedAt: s.competencyClearedAt }
     })
-    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: resetStudents, incompatibilities: cls.incompatibilities, lastResetAt: new Date().toISOString(), competencyIntitules: cls.competencyIntitules }
+    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: resetStudents, incompatibilities: cls.incompatibilities, lastResetAt: new Date().toISOString(), competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updated)
     root.persistClasses()
     root.lastDraw = []
@@ -493,7 +510,7 @@ Item {
     var cls = root.activeClass()
     if (!cls || !ids || ids.length < 2) return
     if (cls.incompatibilities.length >= Store.MAX_INCOMPATIBILITY_SETS) return
-    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities.concat([ids]), lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules }
+    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities.concat([ids]), lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updated)
     root.persistClasses()
     if (root.syncDir) root.runSync()
@@ -504,7 +521,7 @@ Item {
     if (!cls) return
     var list = cls.incompatibilities.slice()
     list.splice(index, 1)
-    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: list, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules }
+    var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: list, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updated)
     root.persistClasses()
     if (root.syncDir) root.runSync()
@@ -919,85 +936,6 @@ Item {
     atomicWrites: true
     printErrors: false
   }
-
-  // ---- pre-launch file check (optional) ----------------------------------
-  // Gabriel, 2026-09-17: reads sujet/corrigé/consignes/agent together and
-  // reports any unclear point or cross-file inconsistency BEFORE creating
-  // the évaluation — separate from requestCreateEvaluation()'s own `test
-  // -f` existence check, which only confirms the paths exist, not that
-  // their content makes sense together.
-
-  property bool filesCheckPopoverOpen: false
-  property bool filesCheckRunning: false
-  property string filesCheckResult: ""
-  property string filesCheckError: ""
-
-  // consigne.md doesn't exist on disk yet at this point in the flow (it's
-  // only written once "Créer l'évaluation" succeeds, see
-  // finalizeCorrectionCreation()) — so the check renders the SAME draft
-  // fields through ConsignesBuilder and writes that text to a throwaway
-  // scratch file under the plugin's own state dir (not the dossier du
-  // devoir) purely so the read-only check agent has a real path to open.
-  function requestCheckCorrectionFiles() {
-    var sujet = root.expandHome(root.correctionDraftSujet)
-    var corrige = root.expandHome(root.correctionDraftCorrige)
-    var agent = root.expandHome(root.correctionDraftAgent)
-    root.filesCheckResult = ""
-    root.filesCheckPopoverOpen = true
-    if (!sujet || !agent || !root.correctionDraftExerciseType) {
-      root.filesCheckError = "Choisissez un type d'exercice et indiquez au moins le sujet et l'agent avant de vérifier (le corrigé est facultatif)."
-      return
-    }
-    root.filesCheckError = ""
-    root.filesCheckRunning = true
-    var consignesText = ConsignesBuilder.build({
-      exerciseType: root.correctionDraftExerciseType,
-      natureEvaluation: root.correctionDraftNature,
-      typeEvaluation: root.correctionDraftType,
-      dureeEpreuve: root.correctionDraftDuree,
-      niveauClasse: root.correctionDraftNiveauClasse,
-      bienveillance: root.correctionDraftBienveillance,
-      priseDeNotes: root.correctionDraftPriseDeNotes,
-      completudeExigee: root.correctionDraftCompletudeExigee,
-      ecartSevereBienveillante: root.correctionDraftEcart,
-      surinterpretation: root.correctionDraftSurinterpretation,
-      niveauDetail: root.correctionDraftNiveauDetail,
-      complements: root.correctionDraftComplements,
-      fixedBlock: root.fixedConsignesBlockFor(root.correctionDraftExerciseType)
-    })
-    var consignesCheckPath = root.stateDir + "/consignes-check-draft.md"
-    filesCheckConsignesFile.path = consignesCheckPath
-    filesCheckConsignesFile.setText(consignesText)
-    var prompt = FilesCheckPromptBuilder.build({
-      sujetPath: sujet, corrigePath: corrige, consignesPath: consignesCheckPath, agentPath: agent
-    })
-    filesCheckProc.command = ClaudeRunner.buildCheckCommand(prompt)
-    filesCheckProc.running = false
-    filesCheckProc.running = true
-  }
-
-  FileView {
-    id: filesCheckConsignesFile
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-  }
-
-  Process {
-    id: filesCheckProc
-    stdout: StdioCollector { id: filesCheckOut; waitForEnd: true }
-    stderr: StdioCollector { id: filesCheckErr; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.filesCheckRunning = false
-      if (exitCode !== 0) {
-        root.filesCheckError = (filesCheckErr.text || "Échec de la vérification.").slice(0, 500)
-        return
-      }
-      root.filesCheckResult = (filesCheckOut.text || "").trim()
-    }
-  }
-
-  function closeFilesCheckPopover() { root.filesCheckPopoverOpen = false }
 
   property bool correctionReplaceConfirmOpen: false
   function requestNewEvaluation() { root.correctionReplaceConfirmOpen = true }
@@ -2011,6 +1949,86 @@ Item {
     return intitules[root.evaluationGridId] || ""
   }
 
+  // ---- per-criterion points ("⚖️ Répartir les points"), Gabriel 2026-10-01 ----
+  // Same idea as the Corrections tab's own criteriaWeights, but scoped per
+  // (classe, grille) on the Class rather than per-évaluation — see
+  // Store.js's Class schema comment. Persistent, never auto-recomputed;
+  // the Note is always the live sum of checked paliers × these weights
+  // (evaluationComputedNote() below), there is no separate stored note
+  // anymore (Gabriel, 2026-10-01: "l'emplacement des notes renvoie
+  // toujours la somme des points selon les cases cochées").
+
+  function evaluationWeights() {
+    var cls = root.activeClass()
+    var all = (cls && cls.competencyWeights) || {}
+    return all[root.evaluationGridId] || {}
+  }
+
+  property bool evaluationWeightsPopoverOpen: false
+  function openEvaluationWeightsPopover() { root.evaluationWeightsPopoverOpen = true }
+  function closeEvaluationWeightsPopover() { root.evaluationWeightsPopoverOpen = false }
+
+  function setEvaluationWeight(rowIndex, points) {
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationGridId) return
+    var all = {}
+    var existingAll = cls.competencyWeights || {}
+    Object.keys(existingAll).forEach(function(gid) { all[gid] = existingAll[gid] })
+    var rows = {}
+    var existingRows = all[root.evaluationGridId] || {}
+    Object.keys(existingRows).forEach(function(k) { rows[k] = existingRows[k] })
+    rows[String(rowIndex)] = Math.max(0, Math.min(root.evaluationBaremeTotal(), points))
+    all[root.evaluationGridId] = rows
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: all, competencyBaremeTotal: cls.competencyBaremeTotal }
+    root.classes = Store.replaceClass(root.classes, updatedClass)
+    root.persistClasses()
+    if (root.syncDir) root.runSync()
+  }
+
+  function resetEvaluationWeights() {
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationGridId) return
+    var all = {}
+    var existingAll = cls.competencyWeights || {}
+    Object.keys(existingAll).forEach(function(gid) { all[gid] = existingAll[gid] })
+    delete all[root.evaluationGridId]
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: all, competencyBaremeTotal: cls.competencyBaremeTotal }
+    root.classes = Store.replaceClass(root.classes, updatedClass)
+    root.persistClasses()
+    if (root.syncDir) root.runSync()
+  }
+
+  // Grading scale for this (classe, grille) — 10 or 20, Gabriel 2026-10-02.
+  function evaluationBaremeTotal() {
+    var cls = root.activeClass()
+    var all = (cls && cls.competencyBaremeTotal) || {}
+    return all[root.evaluationGridId] || 20
+  }
+
+  function setEvaluationBaremeTotal(total) {
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationGridId) return
+    var all = {}
+    var existingAll = cls.competencyBaremeTotal || {}
+    Object.keys(existingAll).forEach(function(gid) { all[gid] = existingAll[gid] })
+    all[root.evaluationGridId] = (Number(total) === 10) ? 10 : 20
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: all }
+    root.classes = Store.replaceClass(root.classes, updatedClass)
+    root.persistClasses()
+    if (root.syncDir) root.runSync()
+  }
+
+  // The only place the Note is computed — never cached/stored (see
+  // [[gh-corrections-plugin]]'s "Stale note incident" for why: a recipe
+  // this cheap to recompute should never risk going stale).
+  function evaluationComputedNote() {
+    var grid = root.activeEvaluationGrid()
+    if (!grid) return ""
+    var entry = root.evaluationGridEntry()
+    var checks = entry ? entry.checks : {}
+    return CompetencyGrids.computeWeightedNote(grid, checks, root.evaluationWeights()).severe
+  }
+
   // -1 = unchecked. Reads straight off the student object (no local
   // sanitize pass on this path — see the rest of this file's convention of
   // sanitizing only on load/sync, trusting in-app mutations).
@@ -2034,15 +2052,15 @@ Item {
       var grids = {}
       var existingGrids = s.competencyGrids || {}
       Object.keys(existingGrids).forEach(function(gid) { grids[gid] = existingGrids[gid] })
-      var entry = grids[root.evaluationGridId] || { checks: {}, appreciation: "", note: "" }
+      var entry = grids[root.evaluationGridId] || { checks: {}, appreciation: "", note: "", annotationsPositif: "", annotationsNegatif: "" }
       var checks = {}
       Object.keys(entry.checks || {}).forEach(function(k) { checks[k] = entry.checks[k] })
       if (checks[rowIndex] === colIndex) delete checks[rowIndex]
       else checks[rowIndex] = colIndex
-      grids[root.evaluationGridId] = { checks: checks, appreciation: entry.appreciation || "", note: entry.note || "" }
-      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids }
+      grids[root.evaluationGridId] = { checks: checks, appreciation: entry.appreciation || "", note: entry.note || "", annotationsPositif: entry.annotationsPositif || "", annotationsNegatif: entry.annotationsNegatif || "" }
+      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: s.competencyClearedAt }
     })
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules }
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updatedClass)
     root.persistClasses()
     if (root.syncDir) root.runSync()
@@ -2077,9 +2095,16 @@ Item {
       var existingGrids = s.competencyGrids || {}
       Object.keys(existingGrids).forEach(function(gid) { grids[gid] = existingGrids[gid] })
       delete grids[root.evaluationGridId]
-      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids }
+      // Tombstones the clear so a sync merge can't resurrect this grid's
+      // data from a stale copy — bug found 2026-10-01, see
+      // Store.mergeCompetencyGrids()'s own header comment.
+      var clearedAt = {}
+      var existingClearedAt = s.competencyClearedAt || {}
+      Object.keys(existingClearedAt).forEach(function(gid) { clearedAt[gid] = existingClearedAt[gid] })
+      clearedAt[root.evaluationGridId] = new Date().toISOString()
+      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: clearedAt }
     })
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules }
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updatedClass)
     root.persistClasses()
     if (root.syncDir) root.runSync()
@@ -2100,9 +2125,13 @@ Item {
       var existingGrids = s.competencyGrids || {}
       Object.keys(existingGrids).forEach(function(gid) { grids[gid] = existingGrids[gid] })
       delete grids[root.evaluationGridId]
-      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids }
+      var clearedAt = {}
+      var existingClearedAt = s.competencyClearedAt || {}
+      Object.keys(existingClearedAt).forEach(function(gid) { clearedAt[gid] = existingClearedAt[gid] })
+      clearedAt[root.evaluationGridId] = new Date().toISOString()
+      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: clearedAt }
     })
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules }
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updatedClass)
     root.persistClasses()
     if (root.syncDir) root.runSync()
@@ -2297,10 +2326,10 @@ Item {
     root.evalSuggestWord = ""
     root.evalSuggestions = []
     evaluationAppreciationField.text = entry ? entry.appreciation : ""
-    evaluationNoteField.text = entry ? entry.note : ""
-    root.evalNoteEstimate = ""
-    root.evalEstimateError = ""
-    root.evalGenAppreciationError = ""
+    evaluationAnnotationsPositifField.text = entry ? (entry.annotationsPositif || "") : ""
+    evaluationAnnotationsNegatifField.text = entry ? (entry.annotationsNegatif || "") : ""
+    root.evalCheckResult = ""
+    root.evalCheckError = ""
     root._evalFieldsLoading = false
   }
 
@@ -2332,19 +2361,22 @@ Item {
     var updatedStudents = cls.students
     if (root.evaluationStudentId) {
       var appreciation = evaluationAppreciationField.text
-      var note = evaluationNoteField.text
+      var annotationsPositif = evaluationAnnotationsPositifField.text
+      var annotationsNegatif = evaluationAnnotationsNegatifField.text
       updatedStudents = cls.students.map(function(s) {
         if (s.id !== root.evaluationStudentId) return s
         var grids = {}
         var existingGrids = s.competencyGrids || {}
         Object.keys(existingGrids).forEach(function(gid) { grids[gid] = existingGrids[gid] })
-        var entry = grids[root.evaluationGridId] || { checks: {}, appreciation: "", note: "" }
-        grids[root.evaluationGridId] = { checks: entry.checks || {}, appreciation: appreciation, note: note }
-        return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids }
+        var entry = grids[root.evaluationGridId] || { checks: {}, appreciation: "", note: "", annotationsPositif: "", annotationsNegatif: "" }
+        // note is no longer stored — always the live sum of checks × weights
+        // now, see evaluationComputedNote().
+        grids[root.evaluationGridId] = { checks: entry.checks || {}, appreciation: appreciation, note: "", annotationsPositif: annotationsPositif, annotationsNegatif: annotationsNegatif }
+        return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: s.competencyClearedAt }
       })
     }
 
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: intitules }
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: intitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updatedClass)
     root.persistClasses()
     if (root.syncDir) root.runSync()
@@ -2376,60 +2408,41 @@ Item {
     var payload = {
       checks: entry.checks || {},
       appreciation: evaluationAppreciationField.text,
-      note: evaluationNoteField.text
+      note: root.evaluationComputedNote()
     }
-    return CompetencyGrids.buildTypstSource(Store.studentLabel(student), cls.name, grid, payload, evaluationIntituleField.text)
+    return CompetencyGrids.buildTypstSource(Store.studentLabel(student), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
   }
 
-  // Grade-estimation helper ("Proposer une note"): a headless Claude call
-  // reads the checked levels + written appreciation and proposes a number
-  // consistent with the fixed barème in PromptBuilder.js. Purely an in-app
-  // suggestion shown in parentheses next to the note field — never
-  // persisted, never written into the exported Typst/PDF, and reset
-  // whenever the student/grid selection changes (loadEvaluationFields).
-  property string evalNoteEstimate: ""
-  property bool evalEstimating: false
-  property string evalEstimateError: ""
-
-  function requestNoteEstimate() {
+  // Same payload as buildEvaluationTypst(), plain markdown instead of
+  // Typst (Gabriel, 2026-10-01) — for pasting somewhere that doesn't read
+  // Typst (ex. École Directe, a markdown-only destination like the
+  // Groupes tab's own "📋 Copier en markdown").
+  function buildEvaluationMarkdown() {
+    var cls = root.activeClass()
     var grid = root.activeEvaluationGrid()
     var student = root.evaluationStudent()
-    if (!grid || !student) return
-    var entry = root.evaluationGridEntry()
-    var checks = entry ? entry.checks : {}
-    var prompt = PromptBuilder.buildNoteEstimatePrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, checks, evaluationAppreciationField.text)
-    root.evalEstimating = true
-    root.evalEstimateError = ""
-    root.evalNoteEstimate = ""
-    evalEstimateProc.command = ClaudeRunner.buildCommand(prompt)
-    evalEstimateProc.running = false
-    evalEstimateProc.running = true
-  }
-
-  Process {
-    id: evalEstimateProc
-    stdout: StdioCollector { id: evalEstimateOut; waitForEnd: true }
-    stderr: StdioCollector { id: evalEstimateErr; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.evalEstimating = false
-      if (exitCode !== 0) {
-        root.evalEstimateError = (evalEstimateErr.text || "Échec de l'estimation.").slice(0, 300)
-        return
-      }
-      root.evalNoteEstimate = (evalEstimateOut.text || "").trim().slice(0, 20)
+    if (!cls || !grid || !student) return ""
+    var entry = (student.competencyGrids && student.competencyGrids[grid.id]) || {}
+    var payload = {
+      checks: entry.checks || {},
+      appreciation: evaluationAppreciationField.text,
+      note: root.evaluationComputedNote()
     }
+    return CompetencyGrids.buildMarkdownSource(Store.studentLabel(student), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
   }
 
-  // Appréciation-generation helper ("Générer une appréciation"): unlike the
-  // note estimate, this one writes straight into the Appréciation field
-  // (it's text meant to be read/edited there anyway, not a number to
-  // transcribe) — overwrites whatever was already typed, same as
-  // "🆕 Nouvelle appréciation" does on the other tab. Fixed house rules
-  // (Gabriel, 2026-09-26): vouvoiement, never discouraging, always
-  // méthode → contenu → expression — enforced in the prompt itself
-  // (PromptBuilder.buildEvalAppreciationPrompt), not re-checked here.
+  // Reinstated 2026-10-02, this time fully independent from the Corrections
+  // tab's own generator ("vraiment à part, débranché", Gabriel's own words)
+  // — see PromptBuilder.buildEvalCompetencesAppreciationPrompt(). Grounded
+  // only in checked paliers (with their real written text) + the two
+  // annotation columns below; overwrites whatever was already typed, same
+  // low-friction convention as "Régénérer l'appréciation" elsewhere.
   property bool evalGeneratingAppreciation: false
   property string evalGenAppreciationError: ""
+  // "courte"/"moyenne"/"longue" — same length options as the Corrections
+  // tab's own regenerate dropdown, persists across students/grids within
+  // the session (not saved to disk, purely a generation-time preference).
+  property string evaluationAppreciationLength: "moyenne"
 
   function requestGenerateEvalAppreciation() {
     var grid = root.activeEvaluationGrid()
@@ -2437,7 +2450,7 @@ Item {
     if (!grid || !student) return
     var entry = root.evaluationGridEntry()
     var checks = entry ? entry.checks : {}
-    var prompt = PromptBuilder.buildEvalAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, checks, evaluationNoteField.text)
+    var prompt = PromptBuilder.buildEvalCompetencesAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, checks, evaluationAnnotationsPositifField.text, evaluationAnnotationsNegatifField.text, root.evaluationAppreciationLength)
     root.evalGeneratingAppreciation = true
     root.evalGenAppreciationError = ""
     evalGenAppreciationProc.command = ClaudeRunner.buildCommand(prompt)
@@ -2460,10 +2473,96 @@ Item {
     }
   }
 
+  // "✓ Vérifier l'orthographe et la syntaxe" — a check ONLY of what Gabriel
+  // himself already wrote/generated in the Appréciation field, fully
+  // grounded (the text to review IS the whole input), no invention
+  // possible by construction. Read-only report, never rewrites the field
+  // itself — he decides what to fix (or uses "✅ Appliquer les
+  // corrections" below).
+  property bool evalCheckingAppreciation: false
+  property string evalCheckResult: ""
+  property string evalCheckError: ""
+
+  function requestCheckAppreciation() {
+    var text = evaluationAppreciationField.text
+    if (!String(text || "").trim()) return
+    var prompt = PromptBuilder.buildAppreciationCheckPrompt(text)
+    root.evalCheckingAppreciation = true
+    root.evalCheckError = ""
+    root.evalCheckResult = ""
+    evalCheckProc.command = ClaudeRunner.buildCommand(prompt)
+    evalCheckProc.running = false
+    evalCheckProc.running = true
+  }
+
+  Process {
+    id: evalCheckProc
+    stdout: StdioCollector { id: evalCheckOut; waitForEnd: true }
+    stderr: StdioCollector { id: evalCheckErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.evalCheckingAppreciation = false
+      if (exitCode !== 0) {
+        root.evalCheckError = (evalCheckErr.text || "Échec de la vérification.").slice(0, 500)
+        return
+      }
+      root.evalCheckResult = (evalCheckOut.text || "").trim()
+    }
+  }
+
+  // "✅ Appliquer les corrections" (Gabriel, 2026-10-02) — a second, separate
+  // call, constrained to the specific faults evalCheckResult already named
+  // (passed in verbatim, see buildAppreciationApplyFixesPrompt), not a
+  // fresh unconstrained rewrite. Overwrites the Appréciation field directly
+  // on success, same low-friction convention as "Régénérer l'appréciation"
+  // elsewhere in this file (no confirm dialog — this is draft text Gabriel
+  // is actively editing, not a destructive delete).
+  property bool evalApplyingFixes: false
+  property string evalApplyFixesError: ""
+
+  function requestApplyAppreciationFixes() {
+    var text = evaluationAppreciationField.text
+    if (!String(text || "").trim() || !root.evalCheckResult || root.evalCheckResult === "RAS") return
+    var prompt = PromptBuilder.buildAppreciationApplyFixesPrompt(text, root.evalCheckResult)
+    root.evalApplyingFixes = true
+    root.evalApplyFixesError = ""
+    evalApplyFixesProc.command = ClaudeRunner.buildCommand(prompt)
+    evalApplyFixesProc.running = false
+    evalApplyFixesProc.running = true
+  }
+
+  Process {
+    id: evalApplyFixesProc
+    stdout: StdioCollector { id: evalApplyFixesOut; waitForEnd: true }
+    stderr: StdioCollector { id: evalApplyFixesErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.evalApplyingFixes = false
+      if (exitCode !== 0) {
+        root.evalApplyFixesError = (evalApplyFixesErr.text || "Échec de l'application des corrections.").slice(0, 500)
+        return
+      }
+      var result = (evalApplyFixesOut.text || "").trim()
+      if (result) evaluationAppreciationField.text = result
+      // The report just got applied (or Gabriel can re-check to confirm) —
+      // clear it so a stale report can't be re-applied a second time.
+      root.evalCheckResult = ""
+    }
+  }
+
   property string evalCopyFeedback: ""
 
   function copyEvaluationTypst() {
     var src = root.buildEvaluationTypst()
+    if (!src) return
+    evalCopyProc.command = ["wl-copy", src]
+    evalCopyProc.running = false
+    evalCopyProc.running = true
+  }
+
+  // Shares evalCopyProc/evalCopyFeedback with copyEvaluationTypst() above —
+  // same clipboard mechanics, just a different source text, no need for a
+  // second Process/Timer pair.
+  function copyEvaluationMarkdown() {
+    var src = root.buildEvaluationMarkdown()
     if (!src) return
     evalCopyProc.command = ["wl-copy", src]
     evalCopyProc.running = false
@@ -2546,6 +2645,75 @@ Item {
     }
   }
 
+  // ---- feature 5: assistant de correction ------------------------------------
+  //
+  // Gabriel, 2026-10-02: a support tool, deliberately NOT an auto-correction
+  // pipeline — no grade, no appréciation, just countable/structural
+  // observations on one copy at a time, read-only (never writes a file),
+  // each "élément de repérage" independently optional. Ephemeral, like GH
+  // Grilles' own in-progress grid: nothing here is persisted to disk.
+
+  property string assistantCopyPath: ""
+  property bool assistantCheckFautes: true
+  property bool assistantCheckPlan: true
+  property bool assistantCheckMiseEnPage: true
+  property bool assistantCheckIntroConclusion: true
+  property bool assistantRunning: false
+  property string assistantError: ""
+  property string assistantResult: ""
+  property string assistantCopyFeedback: ""
+
+  function requestRunCorrectionAssistant() {
+    var path = root.expandHome(root.assistantCopyPath)
+    var items = {
+      fautes: root.assistantCheckFautes,
+      plan: root.assistantCheckPlan,
+      miseEnPage: root.assistantCheckMiseEnPage,
+      introConclusion: root.assistantCheckIntroConclusion
+    }
+    if (!path) { root.assistantError = "Indiquez le chemin de la copie à analyser."; return }
+    if (!items.fautes && !items.plan && !items.miseEnPage && !items.introConclusion) {
+      root.assistantError = "Cochez au moins un élément de repérage."
+      return
+    }
+    root.assistantRunning = true
+    root.assistantError = ""
+    root.assistantResult = ""
+    var prompt = CorrectionAssistantPromptBuilder.build(path, items)
+    assistantProc.command = ClaudeRunner.buildCheckCommand(prompt)
+    assistantProc.running = false
+    assistantProc.running = true
+  }
+
+  Process {
+    id: assistantProc
+    stdout: StdioCollector { id: assistantOut; waitForEnd: true }
+    stderr: StdioCollector { id: assistantErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.assistantRunning = false
+      if (exitCode !== 0) {
+        root.assistantError = (assistantErr.text || "Échec de l'analyse.").slice(0, 500)
+        return
+      }
+      root.assistantResult = (assistantOut.text || "").trim()
+    }
+  }
+
+  function copyAssistantResult() {
+    if (!root.assistantResult) return
+    assistantCopyProc.command = ["wl-copy", root.assistantResult]
+    assistantCopyProc.running = false
+    assistantCopyProc.running = true
+  }
+
+  Process {
+    id: assistantCopyProc
+    onExited: function(exitCode) {
+      root.assistantCopyFeedback = exitCode === 0 ? "Copié !" : "Échec de la copie."
+      assistantCopyFeedbackTimer.restart()
+    }
+  }
+  Timer { id: assistantCopyFeedbackTimer; interval: 2000; repeat: false; onTriggered: root.assistantCopyFeedback = "" }
 
   // ---------------------------------------------------------------- window
 
@@ -2576,12 +2744,12 @@ Item {
           || correctionTitleField.activeFocus || correctionFolderField.activeFocus
           || correctionSujetField.activeFocus || correctionCorrigeField.activeFocus
           || correctionAgentField.activeFocus || correctionComplementsField.activeFocus
-          || evaluationIntituleField.activeFocus || evaluationAppreciationField.activeFocus || evaluationNoteField.activeFocus
+          || evaluationIntituleField.activeFocus || evaluationAppreciationField.activeFocus
+          || evaluationAnnotationsPositifField.activeFocus || evaluationAnnotationsNegatifField.activeFocus
           || root.classSettingsOpen || root.incompatOpen || root.pathBarMode !== ""
           || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen || root.syncSettingsOpen
           || root.agentWizardOpen || root.correctionReplaceConfirmOpen
           || root.correctionConsignesOverwriteConfirmOpen
-          || root.filesCheckPopoverOpen
           || root.correctionWritingPopoverOpen
           || root.correctionLogPopoverStudentId !== ""
           || root.resetEvaluationStudentConfirmOpen || root.resetEvaluationClassConfirmOpen
@@ -2594,15 +2762,31 @@ Item {
           clip: true
           ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
+          // Gabriel, 2026-10-02: panel-wide zoom via a scale transform
+          // rather than multiplying every font.pixelSize in this file
+          // (thousands of them) — zoomWrapper reports the REAL scaled
+          // size to the ScrollView/Flickable (contentColumn.width/height
+          // × uiZoom), so scrolling reaches the whole content with no
+          // clipping; contentColumn's own layout width is pre-divided by
+          // uiZoom so, once visually scaled back up, it still exactly
+          // fills the viewport at any zoom level.
+          Item {
+            id: zoomWrapper
+            width: contentColumn.width * root.uiZoom
+            height: contentColumn.height * root.uiZoom
+
           Column {
-            width: scrollArea.availableWidth
+            id: contentColumn
+            width: scrollArea.availableWidth / root.uiZoom
+            scale: root.uiZoom
+            transformOrigin: Item.TopLeft
             spacing: Style.spacing.huge
 
             // ---------------------------------------------------- header
 
             Item {
               width: parent.width
-              height: Math.max(titleText.implicitHeight, settingsButton.implicitHeight, syncButton.implicitHeight)
+              height: Math.max(titleText.implicitHeight, settingsButton.implicitHeight, syncButton.implicitHeight, zoomControls.implicitHeight)
 
               Text {
                 id: titleText
@@ -2624,6 +2808,42 @@ Item {
                 foreground: root.foreground
                 accent: root.accent
                 onClicked: root.openClassSettings()
+              }
+
+              // Gabriel, 2026-10-02: whole-panel zoom, same idea as GH
+              // Typst's editor zoom but applied to all of GH Classes (not
+              // one editor pane) — see uiZoom/setUiZoom() and zoomWrapper
+              // further down.
+              Row {
+                id: zoomControls
+                anchors.right: syncButton.left
+                anchors.rightMargin: Style.spacing.controlGap
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.spacing.xs
+
+                Button {
+                  text: "−"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.setUiZoom(root.uiZoom - 0.1)
+                }
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(44)
+                  horizontalAlignment: Text.AlignHCenter
+                  text: Math.round(root.uiZoom * 100) + "%"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+                Button {
+                  text: "+"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.setUiZoom(root.uiZoom + 0.1)
+                }
               }
 
               Button {
@@ -2699,6 +2919,7 @@ Item {
                   { value: "appreciations", label: "✍ Appréciations" },
                   { value: "corrections", label: "📝 Corrections" },
                   { value: "evaluation", label: "📋 Eval. Compétences" },
+                  { value: "assistant", label: "🔎 Assistant de correction" },
                   { value: "exercices", label: "📚 Exercices" }
                 ]
                 value: root.activeFeatureTab
@@ -3435,7 +3656,14 @@ Item {
                     Text { text: "Grille de compétences (pipeline agent)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
                     Dropdown {
                       width: parent.width
-                      options: [{ value: "", label: "— Aucune (ancien pipeline, une appréciation directe) —" }].concat(CompetencyGrids.GRIDS.map(function(g) { return { value: g.id, label: g.name } }))
+                      // Filtered against CorrectionsStore.GRID_IDS (not just
+                      // every CompetencyGrids.GRIDS entry): a grid added for
+                      // Eval. Compétences only (ex. "Introduction") isn't
+                      // valid here — picking it would silently fail to
+                      // persist (sanitizeEvaluationParams resets gridId to
+                      // "" on the next load), which is worse than just not
+                      // offering it. Found by Gabriel, 2026-10-02.
+                      options: [{ value: "", label: "— Aucune (ancien pipeline, une appréciation directe) —" }].concat(CompetencyGrids.GRIDS.filter(function(g) { return CorrectionsStore.GRID_IDS.indexOf(g.id) !== -1 }).map(function(g) { return { value: g.id, label: g.name } }))
                       value: root.correctionDraftGridId
                       foreground: root.foreground
                       background: root.background
@@ -3555,7 +3783,14 @@ Item {
                     spacing: Style.spacing.md
                     Text { text: "Paramètres de cette évaluation"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
 
+                    // Only feeds consigne.md (ConsignesBuilder), never
+                    // generated at all once a grille is selected — see
+                    // requestCreateEvaluation()/finalizeCorrectionCreation().
+                    // Gabriel, 2026-10-02: hidden in grid mode, same
+                    // convention as "Type d'exercice"/"Niveau de
+                    // surinterprétation"/"Niveau de détail" above.
                     Dropdown {
+                      visible: root.correctionDraftGridId === ""
                       width: parent.width
                       label: "Nature de l'évaluation"
                       options: ConsignesBuilder.NATURE_OPTIONS
@@ -3568,6 +3803,7 @@ Item {
                     }
 
                     Dropdown {
+                      visible: root.correctionDraftGridId === ""
                       width: parent.width
                       label: "Type d'évaluation"
                       options: ConsignesBuilder.TYPE_OPTIONS
@@ -3580,6 +3816,7 @@ Item {
                     }
 
                     NumberField {
+                      visible: root.correctionDraftGridId === ""
                       label: "Durée de l'épreuve (minutes)"
                       value: root.correctionDraftDuree
                       from: 5
@@ -3619,6 +3856,7 @@ Item {
                     }
 
                     Toggle {
+                      visible: root.correctionDraftGridId === ""
                       width: parent.width
                       label: "Prise de notes acceptée"
                       description: "Sinon, une rédaction complète est exigée."
@@ -3630,6 +3868,7 @@ Item {
                     }
 
                     Toggle {
+                      visible: root.correctionDraftGridId === ""
                       width: parent.width
                       label: "Sujet à traiter intégralement"
                       description: "Coché = une copie incomplète doit être signalée comme telle."
@@ -3641,6 +3880,7 @@ Item {
                     }
 
                     Column {
+                      visible: root.correctionDraftGridId === ""
                       width: parent.width
                       spacing: Style.spacing.xxs
                       Text { text: "Écart sévère / bienveillante : " + root.correctionDraftEcart.toFixed(1) + " pts (neutre = moyenne)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
@@ -3770,14 +4010,6 @@ Item {
                       foreground: root.foreground
                       accent: root.accent
                       onClicked: root.requestCreateEvaluation()
-                    }
-                    Button {
-                      text: root.filesCheckRunning ? "Vérification en cours…" : "🔍 Vérifier les fichiers (facultatif)"
-                      bordered: true
-                      enabled: !root.filesCheckRunning
-                      foreground: root.foreground
-                      accent: root.accent
-                      onClicked: root.requestCheckCorrectionFiles()
                     }
                   }
                 }
@@ -4191,6 +4423,39 @@ Item {
                       onTextChanged: root.queueEvaluationFieldsPersist()
                     }
                   }
+
+                  Dropdown {
+                    visible: root.activeEvaluationGrid() !== null
+                    label: "Barème"
+                    width: Style.space(100)
+                    options: [{ value: "20", label: "/ 20" }, { value: "10", label: "/ 10" }]
+                    value: String(root.evaluationBaremeTotal())
+                    foreground: root.foreground
+                    background: root.background
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    onChanged: function(v) { root.setEvaluationBaremeTotal(v) }
+                  }
+
+                  // Wrapped in a plain Item, same pattern as "🪄 Générer
+                  // l'appréciation" elsewhere in this file — a Flow doesn't
+                  // allow anchoring its own direct children (breaks the
+                  // Flow's positioning entirely, not just this button), so
+                  // the anchor goes on an inner Item instead.
+                  Item {
+                    width: evalWeightsButton.implicitWidth
+                    height: evaluationGridDropdown.implicitHeight
+                    visible: root.activeEvaluationGrid() !== null
+                    Button {
+                      id: evalWeightsButton
+                      anchors.bottom: parent.bottom
+                      text: "⚖️ Répartir les points par critère"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.openEvaluationWeightsPopover()
+                    }
+                  }
                 }
 
                 Text {
@@ -4323,6 +4588,116 @@ Item {
                   spacing: Style.spacing.xxs
 
                   Text {
+                    text: "Annotations"
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: "Notes libres prises en lisant la copie — base, avec la grille, de \"🧠 Générer une appréciation\" ci-dessous. Deux colonnes séparées (Gabriel, 2026-10-02) pour plus de précision."
+                    color: Qt.darker(root.foreground, 1.5)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.spacing.md
+
+                    Column {
+                      width: (parent.width - Style.spacing.md) / 2
+                      spacing: Style.spacing.xxs
+
+                      Text {
+                        text: "Points positifs"
+                        color: Qt.darker(root.foreground, 1.4)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                      }
+
+                      Rectangle {
+                        width: parent.width
+                        height: Style.space(100)
+                        radius: Style.cornerRadius
+                        color: Style.normalFillFor(root.foreground, root.accent)
+                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                        border.width: 1
+                        clip: true
+
+                        ScrollView {
+                          anchors.fill: parent
+                          anchors.margins: Style.space(6)
+                          clip: true
+                          ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                          TextArea {
+                            id: evaluationAnnotationsPositifField
+                            wrapMode: TextArea.Wrap
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            background: null
+                            placeholderText: "Ce qui fonctionne…"
+                            onTextChanged: root.queueEvaluationFieldsPersist()
+                          }
+                        }
+                      }
+                    }
+
+                    Column {
+                      width: (parent.width - Style.spacing.md) / 2
+                      spacing: Style.spacing.xxs
+
+                      Text {
+                        text: "Points négatifs"
+                        color: Qt.darker(root.foreground, 1.4)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                      }
+
+                      Rectangle {
+                        width: parent.width
+                        height: Style.space(100)
+                        radius: Style.cornerRadius
+                        color: Style.normalFillFor(root.foreground, root.accent)
+                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                        border.width: 1
+                        clip: true
+
+                        ScrollView {
+                          anchors.fill: parent
+                          anchors.margins: Style.space(6)
+                          clip: true
+                          ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                          TextArea {
+                            id: evaluationAnnotationsNegatifField
+                            wrapMode: TextArea.Wrap
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            background: null
+                            placeholderText: "Ce qui doit progresser…"
+                            onTextChanged: root.queueEvaluationFieldsPersist()
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+
+                Column {
+                  visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null
+                  width: parent.width
+                  spacing: Style.spacing.xxs
+
+                  Text {
                     text: "Appréciation"
                     color: Qt.darker(root.foreground, 1.4)
                     font.family: root.fontFamily
@@ -4370,7 +4745,14 @@ Item {
                     spacing: Style.spacing.xs
 
                     Text {
-                      anchors.verticalCenter: parent.verticalCenter
+                      // No anchors here — see the "QML Flow-anchors gotcha"
+                      // memory, same mistake fixed elsewhere in this tab
+                      // 2026-10-01: a direct Flow child can't be anchored at
+                      // all (confirmed live in journalctl, repeated "Cannot
+                      // specify anchors for items inside Flow" warnings
+                      // exactly matching Gabriel's "tout a disparu" report,
+                      // 2026-10-02). Flow top-aligns by default, fine here
+                      // since this label and the chips are similar height.
                       text: "Orthographe :"
                       color: Qt.darker(root.foreground, 1.4)
                       font.family: root.fontFamily
@@ -4442,41 +4824,20 @@ Item {
                   visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null
                   spacing: Style.spacing.xxs
 
-                  Text {
-                    text: "Note"
-                    color: Qt.darker(root.foreground, 1.4)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                  }
-
                   Row {
                     spacing: Style.spacing.xs
 
-                    TextField {
-                      id: evaluationNoteField
-                      width: Style.space(80)
-                      foreground: root.foreground
-                      accent: root.accent
-                      placeholderText: "—"
-                      onTextChanged: root.queueEvaluationFieldsPersist()
-                    }
+                    // Toujours la somme des points × palier cochés (jamais
+                    // une valeur stockée/éditable à la main) — Gabriel,
+                    // 2026-10-01. Changer le résultat passe par "⚖️ Répartir
+                    // les points par critère" ci-dessus, pas par ce champ.
                     Text {
                       anchors.verticalCenter: parent.verticalCenter
-                      text: "/ 20"
+                      text: "Note : " + (root.evaluationComputedNote() || "—") + " / " + root.evaluationBaremeTotal()
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
-                    }
-
-                    Button {
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: root.evalEstimating ? "Estimation…" : "🎯 Proposer une note"
-                      bordered: true
-                      enabled: !root.evalEstimating
-                      foreground: root.foreground
-                      accent: root.accent
-                      onClicked: root.requestNoteEstimate()
+                      font.bold: true
                     }
 
                     Button {
@@ -4486,25 +4847,43 @@ Item {
                       enabled: !root.evalGeneratingAppreciation
                       foreground: root.foreground
                       accent: root.accent
-                      tooltipText: "Remplace le texte actuel de l'Appréciation ci-dessus"
+                      tooltipText: "Remplace le texte actuel de l'Appréciation ci-dessus, à partir de la grille et des annotations"
                       onClicked: root.requestGenerateEvalAppreciation()
                     }
 
-                    Text {
+                    Dropdown {
                       anchors.verticalCenter: parent.verticalCenter
-                      visible: root.evalNoteEstimate !== ""
-                      text: "(estimation : " + root.evalNoteEstimate + " / 20)"
-                      color: root.accent
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      textFormat: Text.PlainText
+                      label: "Longueur"
+                      width: Style.space(120)
+                      options: [
+                        { value: "courte", label: "Courte" },
+                        { value: "moyenne", label: "Moyenne" },
+                        { value: "longue", label: "Longue" }
+                      ]
+                      value: root.evaluationAppreciationLength
+                      foreground: root.foreground
+                      background: root.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onChanged: function(v) { root.evaluationAppreciationLength = v }
+                    }
+
+                    Button {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: root.evalCheckingAppreciation ? "Vérification…" : "✓ Vérifier l'orthographe et la syntaxe"
+                      bordered: true
+                      enabled: !root.evalCheckingAppreciation
+                      foreground: root.foreground
+                      accent: root.accent
+                      tooltipText: "Relit le texte actuel de l'Appréciation ci-dessus, sans le modifier"
+                      onClicked: root.requestCheckAppreciation()
                     }
                   }
 
                   Text {
-                    visible: root.evalEstimateError !== ""
+                    visible: root.evalGenAppreciationError !== ""
                     width: Style.space(320)
-                    text: root.evalEstimateError
+                    text: root.evalGenAppreciationError
                     color: Color.urgent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -4513,9 +4892,42 @@ Item {
                   }
 
                   Text {
-                    visible: root.evalGenAppreciationError !== ""
+                    visible: root.evalCheckError !== ""
                     width: Style.space(320)
-                    text: root.evalGenAppreciationError
+                    text: root.evalCheckError
+                    color: Color.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                  }
+
+                  Text {
+                    visible: root.evalCheckResult !== ""
+                    width: Style.space(420)
+                    text: root.evalCheckResult
+                    color: root.evalCheckResult === "RAS" ? Qt.darker(root.foreground, 1.4) : root.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                  }
+
+                  Button {
+                    visible: root.evalCheckResult !== "" && root.evalCheckResult !== "RAS"
+                    text: root.evalApplyingFixes ? "Application…" : "✅ Appliquer les corrections"
+                    bordered: true
+                    enabled: !root.evalApplyingFixes
+                    foreground: root.foreground
+                    accent: root.accent
+                    tooltipText: "Réécrit l'Appréciation ci-dessus en corrigeant uniquement les fautes listées ci-dessus"
+                    onClicked: root.requestApplyAppreciationFixes()
+                  }
+
+                  Text {
+                    visible: root.evalApplyFixesError !== ""
+                    width: Style.space(320)
+                    text: root.evalApplyFixesError
                     color: Color.urgent
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -4534,6 +4946,13 @@ Item {
                     foreground: root.foreground
                     accent: root.accent
                     onClicked: root.copyEvaluationTypst()
+                  }
+                  Button {
+                    text: "📋 Copier le code markdown"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: root.accent
+                    onClicked: root.copyEvaluationMarkdown()
                   }
                   Button {
                     text: "📄 Exporter en PDF"
@@ -4589,6 +5008,162 @@ Item {
                 }
               }
 
+              // ======================================= assistant de correction
+
+              Column {
+                visible: root.activeFeatureTab === "assistant"
+                width: parent.width
+                spacing: Style.spacing.huge
+
+                Text {
+                  text: "Assistant de correction"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                }
+
+                Text {
+                  width: parent.width
+                  text: "Un outil de soutien, pas une correction automatique : il ne propose ni note ni appréciation, seulement des observations ponctuelles sur une copie — à vous de lire et juger. Lecture seule, n'écrit jamais rien sur la copie elle-même."
+                  color: Qt.darker(root.foreground, 1.4)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+
+                Column {
+                  width: parent.width
+                  spacing: Style.spacing.xxs
+                  Text { text: "Copie à analyser (PDF ou PNG)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                  TextField {
+                    id: assistantCopyField
+                    width: parent.width
+                    text: root.assistantCopyPath
+                    placeholderText: "chemin du fichier .pdf ou .png…"
+                    foreground: root.foreground
+                    accent: root.accent
+                    maximumLength: 2000
+                    onTextChanged: root.assistantCopyPath = text
+                  }
+                }
+
+                Column {
+                  width: parent.width
+                  spacing: Style.spacing.xs
+                  Text { text: "Éléments de repérage"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+
+                  Toggle {
+                    width: parent.width
+                    label: "Statistiques des fautes d'expression écrite par type"
+                    checked: root.assistantCheckFautes
+                    foreground: root.foreground
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    onClicked: root.assistantCheckFautes = !root.assistantCheckFautes
+                  }
+                  Toggle {
+                    width: parent.width
+                    label: "Extraction du plan détaillé (problématique, axes, sous-parties)"
+                    checked: root.assistantCheckPlan
+                    foreground: root.foreground
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    onClicked: root.assistantCheckPlan = !root.assistantCheckPlan
+                  }
+                  Toggle {
+                    width: parent.width
+                    label: "Analyse de la mise en page"
+                    checked: root.assistantCheckMiseEnPage
+                    foreground: root.foreground
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    onClicked: root.assistantCheckMiseEnPage = !root.assistantCheckMiseEnPage
+                  }
+                  Toggle {
+                    width: parent.width
+                    label: "Analyse de l'introduction et de la conclusion"
+                    checked: root.assistantCheckIntroConclusion
+                    foreground: root.foreground
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    onClicked: root.assistantCheckIntroConclusion = !root.assistantCheckIntroConclusion
+                  }
+                }
+
+                Row {
+                  spacing: Style.spacing.controlGap
+                  Button {
+                    text: root.assistantRunning ? "Analyse en cours…" : "🔎 Lancer l'analyse"
+                    bordered: true
+                    enabled: !root.assistantRunning
+                    foreground: root.foreground
+                    accent: root.accent
+                    onClicked: root.requestRunCorrectionAssistant()
+                  }
+                  Button {
+                    visible: root.assistantResult !== ""
+                    text: "📋 Copier le résultat"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: root.accent
+                    onClicked: root.copyAssistantResult()
+                  }
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: root.assistantCopyFeedback !== ""
+                    text: root.assistantCopyFeedback
+                    color: Qt.darker(root.foreground, 1.3)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                Text {
+                  visible: root.assistantError !== ""
+                  width: parent.width
+                  text: root.assistantError
+                  color: Color.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                  textFormat: Text.PlainText
+                }
+
+                // Résultat — défilant, hauteur bornée plutôt qu'illimitée
+                // (un relevé de fautes détaillé sur une longue copie peut
+                // être long) : même esprit que les autres zones de texte
+                // défilantes de ce fichier.
+                Rectangle {
+                  visible: root.assistantResult !== "" || root.assistantRunning
+                  width: parent.width
+                  height: Style.space(320)
+                  radius: Style.cornerRadius
+                  color: Style.normalFillFor(root.foreground, root.accent)
+                  border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                  border.width: 1
+                  clip: true
+
+                  ScrollView {
+                    id: assistantResultScroll
+                    anchors.fill: parent
+                    anchors.margins: Style.space(10)
+                    clip: true
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+                    Text {
+                      width: assistantResultScroll.availableWidth
+                      text: root.assistantRunning ? "Analyse en cours…" : root.assistantResult
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      wrapMode: Text.WordWrap
+                      textFormat: Text.PlainText
+                    }
+                  }
+                }
+              }
+
               // ================================================= exercices
 
               Column {
@@ -4613,6 +5188,7 @@ Item {
                 }
               }
             }
+          }
           }
         }
       }
@@ -4771,6 +5347,21 @@ Item {
         onResetRequested: root.correctionDraftWeights = {}
       }
 
+      CriteriaWeightsPopover {
+        anchors.fill: parent
+        opened: root.evaluationWeightsPopoverOpen
+        grid: root.activeEvaluationGrid()
+        weights: root.evaluationWeights()
+        total: root.evaluationBaremeTotal()
+        foreground: root.foreground
+        background: root.background
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onCanceled: root.closeEvaluationWeightsPopover()
+        onWeightChanged: function(rowIndex, points) { root.setEvaluationWeight(rowIndex, points) }
+        onResetRequested: root.resetEvaluationWeights()
+      }
+
       ConfirmDialog {
         anchors.fill: parent
         opened: root.deleteClassPendingId !== ""
@@ -4821,19 +5412,6 @@ Item {
         foreground: root.foreground
         onCanceled: root.cancelCorrectionConsignesOverwrite()
         onConfirmed: root.finalizeCorrectionCreation()
-      }
-
-      FilesCheckPopover {
-        anchors.fill: parent
-        opened: root.filesCheckPopoverOpen
-        running: root.filesCheckRunning
-        result: root.filesCheckResult
-        error: root.filesCheckError
-        foreground: root.foreground
-        background: root.background
-        accent: root.accent
-        fontFamily: root.fontFamily
-        onCanceled: root.closeFilesCheckPopover()
       }
 
       ConfirmDialog {

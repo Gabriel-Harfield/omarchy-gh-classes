@@ -366,6 +366,34 @@ Item {
 
   property string activeFeatureTab: "tirage" // tirage | groupes | appreciations | corrections | evaluation | assistant | exercices
 
+  // Every feature tab lives in the same ScrollView (siblings toggled by
+  // `visible`), so they share one contentY. Leaving a long tab scrolled
+  // far down (Corrections) for a shorter one kept that contentY — the
+  // Flickable never clamps it when contentHeight shrinks — so the viewport
+  // sat below the new content and the panel looked empty until scrolled
+  // back up. Intermittent because it depends on how far down you were.
+  // Fix: start every tab/class at the top, and clamp on any shrink
+  // (zoom, collapsing sections, cleared results...).
+  onActiveFeatureTabChanged: root.scrollPanelToTop()
+  onActiveClassIdChanged: root.scrollPanelToTop()
+
+  function scrollPanelToTop() {
+    if (scrollArea && scrollArea.contentItem) scrollArea.contentItem.contentY = 0
+  }
+
+  function clampPanelScroll() {
+    var f = scrollArea ? scrollArea.contentItem : null
+    if (!f) return
+    var maxY = Math.max(0, f.contentHeight - f.height)
+    if (f.contentY > maxY) f.contentY = maxY
+  }
+
+  Connections {
+    target: scrollArea ? scrollArea.contentItem : null
+    function onContentHeightChanged() { root.clampPanelScroll() }
+    function onHeightChanged() { root.clampPanelScroll() }
+  }
+
   // ---- class creation (Paramètres) -----------------------------------------
 
   property bool classSettingsOpen: false

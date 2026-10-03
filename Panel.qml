@@ -2774,6 +2774,13 @@ Item {
             id: zoomWrapper
             width: contentColumn.width * root.uiZoom
             height: contentColumn.height * root.uiZoom
+            // ScrollView sizes its scrollable range from the content
+            // item's implicitWidth/implicitHeight, not width/height — a
+            // plain Item never derives one from the other, so without
+            // this the Flickable's contentHeight stayed stuck at 0 and
+            // only long tabs (Corrections) exposed the missing scroll.
+            implicitWidth: width
+            implicitHeight: height
 
           Column {
             id: contentColumn

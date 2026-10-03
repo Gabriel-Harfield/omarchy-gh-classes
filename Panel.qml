@@ -16,11 +16,11 @@ import "lib/CopyMatcher.js" as CopyMatcher
 import "lib/CorrectionPromptBuilder.js" as CorrectionPromptBuilder
 import "lib/ExerciseTypes.js" as ExerciseTypes
 import "lib/ConsignesBuilder.js" as ConsignesBuilder
-import "lib/ConsignesTemplateCommentaire.js" as TemplateCommentaire
 import "lib/CompetencyGrids.js" as CompetencyGrids
 import "lib/Spellcheck.js" as Spellcheck
 import "lib/CompetencyPromptBuilder.js" as CompetencyPromptBuilder
 import "lib/CorrectionAssistantPromptBuilder.js" as CorrectionAssistantPromptBuilder
+import "lib/EvalTemplatesStore.js" as EvalTemplatesStore
 import "ui"
 
 // GH Classes: one tab per class, weighted-random draw, group generation
@@ -78,6 +78,11 @@ Item {
   readonly property string settingsPath: root.stateDir + "/settings.json"
   readonly property string correctionsPath: root.stateDir + "/corrections.json"
   readonly property string correctionRunsDir: root.stateDir + "/corrections-runs"
+  // Saved évaluation-creation presets (Gabriel, 2026-10-03) — see
+  // lib/EvalTemplatesStore.js's header comment for why this is its own file,
+  // synced the same way as classes.json rather than left inside
+  // corrections.json.
+  readonly property string evalTemplatesPath: root.stateDir + "/eval_templates.json"
 
   function expandHome(path) {
     var p = String(path || "").trim()
@@ -129,6 +134,24 @@ Item {
     onExited: classesFile.setText(root._pendingClassesJson)
   }
 
+  // ---- persisted: évaluation-creation templates ("modèles") --------------
+
+  property var evalTemplates: []
+
+  FileView {
+    id: evalTemplatesFile
+    path: root.evalTemplatesPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.evalTemplates = EvalTemplatesStore.parseTemplates(evalTemplatesFile.text())
+    onLoadFailed: root.evalTemplates = []
+  }
+
+  function persistEvalTemplates() {
+    evalTemplatesFile.setText(EvalTemplatesStore.serializeTemplates(root.evalTemplates))
+  }
+
   // ---- persisted: settings (last active class tab + sync folder) ----------
 
   property string activeClassId: ""
@@ -138,6 +161,10 @@ Item {
   // pane; for when he wants bigger text/controls without touching the
   // whole desktop's scale. See setUiZoom() and the zoomWrapper Item below.
   property real uiZoom: 1.0
+  // agent.md's path — global now, set once here rather than re-pointed at
+  // for every évaluation (Gabriel, 2026-10-03). Local-only, like syncDir:
+  // never synced (it's a filesystem path, meaningless on another machine).
+  property string agentPath: ""
 
   FileView {
     id: settingsFile
@@ -150,12 +177,35 @@ Item {
       root.activeClassId = s.activeClassId
       root.syncDir = s.syncDir
       root.uiZoom = s.uiZoom
+      root.agentPath = s.agentPath
+      root.seedDefaultAgentPathIfEmpty()
     }
-    onLoadFailed: { root.activeClassId = ""; root.syncDir = ""; root.uiZoom = 1.0 }
+    onLoadFailed: {
+      root.activeClassId = ""; root.syncDir = ""; root.uiZoom = 1.0; root.agentPath = ""
+      root.seedDefaultAgentPathIfEmpty()
+    }
+  }
+
+  // First run after agent.md became a global setting (Gabriel, 2026-10-03,
+  // "tu peux importer mon agent.md... comme modèle pour moi") — seeds it
+  // from the copy imported into stateDir once, rather than leaving the
+  // field empty until he repoints it by hand. Only ever fires once: it
+  // persists immediately, so agentPath is non-empty on every later load.
+  function seedDefaultAgentPathIfEmpty() {
+    if (root.agentPath !== "") return
+    root.agentPath = root.stateDir + "/agent.md"
+    root.persistSettings()
   }
 
   function persistSettings() {
-    settingsFile.setText(Store.serializeSettings({ activeClassId: root.activeClassId, syncDir: root.syncDir, uiZoom: root.uiZoom }))
+    settingsFile.setText(Store.serializeSettings({ activeClassId: root.activeClassId, syncDir: root.syncDir, uiZoom: root.uiZoom, agentPath: root.agentPath }))
+  }
+
+  function setAgentPath(path) {
+    var clean = root.expandHome(path).slice(0, 1024)
+    if (clean === root.agentPath) return
+    root.agentPath = clean
+    root.persistSettings()
   }
 
   function setUiZoom(zoom) {
@@ -248,6 +298,43 @@ Item {
 
   FileView {
     id: syncWriteFile
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    // classes.json done → chain into eval_templates.json rather than
+    // clearing syncInFlight here (see runTemplatesSync() below) — one
+    // "sync" action now covers both files.
+    onSaved: root.runTemplatesSync()
+  }
+
+  // ---- eval_templates.json sync — plain union by id (see
+  // EvalTemplatesStore.mergeTemplates()'s own header comment for why this
+  // is simpler than classes.json's reconciliation) — chained after classes
+  // sync above, same ensured directory, same syncInFlight flag.
+
+  function runTemplatesSync() {
+    var cmd = Files.readCommand(root._syncPendingDir, "eval_templates.json", 4194304, 5)
+    if (!cmd) { syncInFlightTimeout.stop(); root.syncInFlight = false; return }
+    syncTemplatesReadProc.command = cmd
+    syncTemplatesReadProc.running = false
+    syncTemplatesReadProc.running = true
+  }
+
+  Process {
+    id: syncTemplatesReadProc
+    stdout: StdioCollector { id: syncTemplatesReadOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var remoteTemplates = EvalTemplatesStore.parseTemplates(syncTemplatesReadOut.text || "[]")
+      var merged = EvalTemplatesStore.mergeTemplates(root.evalTemplates, remoteTemplates)
+      root.evalTemplates = merged
+      root.persistEvalTemplates()
+      syncTemplatesWriteFile.path = root._syncPendingDir + "/eval_templates.json"
+      Qt.callLater(function() { syncTemplatesWriteFile.setText(EvalTemplatesStore.serializeTemplates(merged)) })
+    }
+  }
+
+  FileView {
+    id: syncTemplatesWriteFile
     watchChanges: false
     atomicWrites: true
     printErrors: false
@@ -658,6 +745,35 @@ Item {
     return CorrectionsStore.getEvaluation(root.corrections, root.currentCorrectionsClassId())
   }
 
+  // Gabriel, 2026-10-03: "j'ai oublié de cocher court" — niveauDetail used
+  // to be set once at creation with no way back short of recreating the
+  // whole évaluation. Patches the live évaluation AND regenerates
+  // consigne.md from its own stored fields (ConsignesBuilder.build(), same
+  // call as at creation) — leaving the old text there would silently
+  // contradict the fresh instruction CorrectionPromptBuilder.build() sends
+  // directly for the next copy corrected, exactly the kind of inconsistency
+  // this whole feature set has been trying to avoid. Circuit A (gridId set)
+  // never reads niveauDetail/consigne.md at all — not offered there.
+  function setEvaluationNiveauDetail(niveauDetail) {
+    var classId = root.currentCorrectionsClassId()
+    var ev = CorrectionsStore.getEvaluation(root.corrections, classId)
+    if (!ev || ev.gridId || ev.niveauDetail === niveauDetail) return
+    var updated = {}
+    for (var k in ev) updated[k] = ev[k]
+    updated.niveauDetail = niveauDetail
+    root.corrections = CorrectionsStore.setEvaluation(root.corrections, classId, updated)
+    root.persistCorrections()
+    var consignesText = ConsignesBuilder.build({
+      exerciseType: updated.exerciseType, natureEvaluation: updated.natureEvaluation, typeEvaluation: updated.typeEvaluation,
+      dureeEpreuve: updated.dureeEpreuve, niveauClasse: updated.niveauClasse, bienveillance: updated.bienveillance,
+      priseDeNotes: updated.priseDeNotes, completudeExigee: updated.completudeExigee,
+      surinterpretation: updated.surinterpretation, niveauDetail: updated.niveauDetail,
+      complements: updated.complements, notee: updated.notee, bareme: updated.bareme
+    })
+    correctionConsignesSaveFile.path = updated.consignesPath
+    correctionConsignesSaveFile.setText(consignesText)
+  }
+
   function setCorrectionStudentPatch(classId, studentId, patch) {
     var ev = CorrectionsStore.getEvaluation(root.corrections, classId)
     if (!ev) return
@@ -676,10 +792,12 @@ Item {
   // retired from this flow — Gabriel, 2026-09-24.
 
   property string correctionDraftTitle: ""
+  // Sujet/corrigé are no longer typed in — Gabriel, 2026-10-03: "sujet.pdf"
+  // et "corrigé.pdf" doivent toujours être rangés sous ces noms exacts dans
+  // le dossier du devoir ci-dessous, pour une bricole de moins. Derived in
+  // requestCreateEvaluation() (sujet mandatory, corrigé only if the file
+  // actually exists there — see correctionCorrigeCheckProc).
   property string correctionDraftFolder: ""
-  property string correctionDraftSujet: ""
-  property string correctionDraftCorrige: ""
-  property string correctionDraftAgent: ""
   property string correctionDraftExerciseType: ""
   // Which CompetencyGrids.GRIDS entry this évaluation will use — "" means
   // the older free-form single-shot pipeline (CorrectionPromptBuilder),
@@ -706,10 +824,26 @@ Item {
   property int correctionDraftBienveillance: 5
   property bool correctionDraftPriseDeNotes: false
   property bool correctionDraftCompletudeExigee: true
-  property real correctionDraftEcart: 2
   property string correctionDraftSurinterpretation: "neutre"
   property string correctionDraftNiveauDetail: "moyen"
   property string correctionDraftComplements: ""
+  // Which appreciation paragraphs CorrectionPromptBuilder.build() imposes —
+  // see applyStructureDefaultsForType() for the per-exerciseType precoche.
+  // Each has its own list of critères précis instead of a single free-text
+  // consigne (Gabriel, 2026-10-03 — "j'ai envie de faire une liste de
+  // compétences", peu de place dans un champ texte unique): [{ id, text }].
+  property bool correctionDraftStructMethode: false
+  property bool correctionDraftStructContenu: true
+  property bool correctionDraftStructLangue: true
+  property var correctionDraftMethodeCriteres: []
+  property var correctionDraftContenuCriteres: []
+  property var correctionDraftLangueCriteres: []
+  // { "<critère id>": points out of 20 } — only shown/meaningful when
+  // correctionDraftNotee is true; see CorrectionPromptBuilder.build()'s
+  // weightedCriteres and Panel.qml's finalizeCorrectionSuccess().
+  property var correctionDraftCriteriaPoints: ({})
+  property bool correctionDraftNotee: true
+  property string correctionDraftBareme: ""
   property string correctionDraftWritingMode: "manuscrit"
   property var correctionDraftWritingExceptions: []
   property string correctionCreateError: ""
@@ -720,9 +854,6 @@ Item {
   function resetCorrectionDraft() {
     root.correctionDraftTitle = ""
     root.correctionDraftFolder = ""
-    root.correctionDraftSujet = ""
-    root.correctionDraftCorrige = ""
-    root.correctionDraftAgent = ""
     root.correctionDraftExerciseType = ""
     root.correctionDraftGridId = ""
     root.correctionDraftWeights = {}
@@ -733,26 +864,158 @@ Item {
     root.correctionDraftBienveillance = 5
     root.correctionDraftPriseDeNotes = false
     root.correctionDraftCompletudeExigee = true
-    root.correctionDraftEcart = 2
     root.correctionDraftSurinterpretation = "neutre"
     root.correctionDraftNiveauDetail = "moyen"
     root.correctionDraftComplements = ""
+    root.correctionDraftStructMethode = false
+    root.correctionDraftStructContenu = true
+    root.correctionDraftStructLangue = true
+    root.correctionDraftMethodeCriteres = []
+    root.correctionDraftContenuCriteres = []
+    root.correctionDraftLangueCriteres = []
+    root.correctionDraftCriteriaPoints = {}
+    root.correctionDraftNotee = true
+    root.correctionDraftBareme = ""
     root.correctionDraftWritingMode = "manuscrit"
     root.correctionDraftWritingExceptions = []
     root.correctionCreateError = ""
     root.correctionCreating = false
   }
 
-  // The fixed consignes corpus for the currently-selected exerciseType, or
-  // "" if none is written yet (ExerciseTypes.hasTemplate() is false) — the
-  // one place that knows how to resolve an exerciseType to its template
-  // module, since ConsignesBuilder.js deliberately doesn't import
-  // ExerciseTypes.js/ConsignesTemplateCommentaire.js itself (see that file's
-  // header comment).
-  function fixedConsignesBlockFor(exerciseType) {
-    if (exerciseType === "commentaire") return TemplateCommentaire.fixedBlock()
-    return ""
+  // ---- évaluation-creation wizard: critère lists (Méthode/Contenu/Langue) --
+  // Gabriel, 2026-10-03: same add/remove-by-id shape as GH Grilles' own rows,
+  // kept inline here rather than importing that plugin's TableGen/RowsList —
+  // no tags/sections needed, just a flat list of short critère texts per
+  // paragraph.
+
+  function critereListFor(category) {
+    if (category === "methode") return root.correctionDraftMethodeCriteres
+    if (category === "contenu") return root.correctionDraftContenuCriteres
+    return root.correctionDraftLangueCriteres
   }
+  function setCritereListFor(category, list) {
+    if (category === "methode") root.correctionDraftMethodeCriteres = list
+    else if (category === "contenu") root.correctionDraftContenuCriteres = list
+    else root.correctionDraftLangueCriteres = list
+  }
+  function addCritere(category, text) {
+    var t = String(text || "").trim()
+    if (!t) return
+    root.setCritereListFor(category, root.critereListFor(category).concat([{ id: Store.makeId(), text: t }]))
+  }
+  function removeCritere(category, id) {
+    root.setCritereListFor(category, root.critereListFor(category).filter(function(c) { return c.id !== id }))
+    var points = {}
+    for (var k in root.correctionDraftCriteriaPoints) if (k !== id) points[k] = root.correctionDraftCriteriaPoints[k]
+    root.correctionDraftCriteriaPoints = points
+  }
+  function setCriterionPoints(id, points) {
+    var map = {}
+    for (var k in root.correctionDraftCriteriaPoints) map[k] = root.correctionDraftCriteriaPoints[k]
+    // Whole points only — NumberField (the shared Ui widget behind this
+    // field) is strictly int-typed (value/from/to/stepSize), no half-point
+    // support, see Gabriel's 2026-10-03 crash report.
+    map[id] = Math.round(Math.max(0, Math.min(20, points)))
+    root.correctionDraftCriteriaPoints = map
+  }
+
+  // ---- évaluation-creation wizard: save/load as a reusable "modèle" -------
+  // Gabriel, 2026-10-03: il enseigne 2 classes de 2nde + 3 de 1ère, et fait
+  // souvent tourner le même petit exercice sur plusieurs d'entre elles — un
+  // modèle évite de tout retaper à chaque classe. Ne capture QUE les champs
+  // du wizard ci-dessus (voir EvalTemplatesStore.js) — jamais folder/sujet/
+  // corrigé/agent, toujours propres à cette classe-ci et ce passage-ci.
+
+  property string evalTemplateSaveName: ""
+
+  function requestSaveEvalTemplate() {
+    var t = EvalTemplatesStore.sanitizeTemplate({
+      name: root.evalTemplateSaveName,
+      exerciseType: root.correctionDraftExerciseType,
+      gridId: root.correctionDraftGridId,
+      natureEvaluation: root.correctionDraftNature,
+      typeEvaluation: root.correctionDraftType,
+      dureeEpreuve: root.correctionDraftDuree,
+      niveauClasse: root.correctionDraftNiveauClasse,
+      bienveillance: root.correctionDraftBienveillance,
+      priseDeNotes: root.correctionDraftPriseDeNotes,
+      completudeExigee: root.correctionDraftCompletudeExigee,
+      surinterpretation: root.correctionDraftSurinterpretation,
+      niveauDetail: root.correctionDraftNiveauDetail,
+      structMethode: root.correctionDraftStructMethode,
+      structContenu: root.correctionDraftStructContenu,
+      structLangue: root.correctionDraftStructLangue,
+      methodeCriteres: root.correctionDraftMethodeCriteres,
+      contenuCriteres: root.correctionDraftContenuCriteres,
+      langueCriteres: root.correctionDraftLangueCriteres,
+      criteriaPoints: root.correctionDraftCriteriaPoints,
+      notee: root.correctionDraftNotee,
+      bareme: root.correctionDraftBareme
+    })
+    if (!t) return
+    root.evalTemplates = root.evalTemplates.concat([t])
+    root.persistEvalTemplates()
+    root.evalTemplateSaveName = ""
+    if (root.syncDir) root.runSync()
+  }
+
+  function applyEvalTemplate(id) {
+    var t = EvalTemplatesStore.findTemplate(root.evalTemplates, id)
+    if (!t) return
+    root.correctionDraftExerciseType = t.exerciseType
+    root.correctionDraftGridId = t.gridId
+    root.correctionDraftNature = t.natureEvaluation
+    root.correctionDraftType = t.typeEvaluation
+    root.correctionDraftDuree = t.dureeEpreuve
+    root.correctionDraftNiveauClasse = t.niveauClasse
+    root.correctionDraftBienveillance = t.bienveillance
+    root.correctionDraftPriseDeNotes = t.priseDeNotes
+    root.correctionDraftCompletudeExigee = t.completudeExigee
+    root.correctionDraftSurinterpretation = t.surinterpretation
+    root.correctionDraftNiveauDetail = t.niveauDetail
+    root.correctionDraftStructMethode = t.structMethode
+    root.correctionDraftStructContenu = t.structContenu
+    root.correctionDraftStructLangue = t.structLangue
+    root.correctionDraftMethodeCriteres = t.methodeCriteres
+    root.correctionDraftContenuCriteres = t.contenuCriteres
+    root.correctionDraftLangueCriteres = t.langueCriteres
+    root.correctionDraftCriteriaPoints = t.criteriaPoints
+    root.correctionDraftNotee = t.notee
+    root.correctionDraftBareme = t.bareme
+  }
+
+  // Precoche la case "Méthode" seulement pour les types organisés en
+  // axes/sous-parties (voir ExerciseTypes.usesPlanExtraction) — pour les
+  // autres (questionnaire de lecture, contraction...), ce paragraphe n'a
+  // rien d'organique à décrire. Contenu/Langue restent cochées dans tous
+  // les cas : l'agent les remplit bien même sans consigne dédiée. Appelé au
+  // choix du type d'exercice — écrase tout cochage manuel déjà fait, comme
+  // un changement de type recommence le formulaire.
+  function applyStructureDefaultsForType(exerciseType) {
+    root.correctionDraftStructMethode = ExerciseTypes.usesPlanExtraction(exerciseType)
+    root.correctionDraftStructContenu = true
+    root.correctionDraftStructLangue = true
+  }
+
+  // ---- flatten the 3 critère lists (for notation + prompt building) -------
+  // Fixed order (Méthode, puis Contenu, puis Langue), same order the prompt
+  // lists them in — see CorrectionPromptBuilder.build(). weightsSource lets
+  // callers pass either the live draft's points map or a persisted
+  // évaluation's own criteriaPoints.
+  function flattenCriteres(structMethode, methodeCriteres, structContenu, contenuCriteres, structLangue, langueCriteres) {
+    var out = []
+    if (structMethode) (methodeCriteres || []).forEach(function(c) { out.push({ label: "Méthode", id: c.id, text: c.text }) })
+    if (structContenu !== false) (contenuCriteres || []).forEach(function(c) { out.push({ label: "Contenu", id: c.id, text: c.text }) })
+    if (structLangue !== false) (langueCriteres || []).forEach(function(c) { out.push({ label: "Expression écrite", id: c.id, text: c.text }) })
+    return out
+  }
+
+  function weightedCriteresFrom(flat, weightsSource) {
+    var w = weightsSource || {}
+    return flat.filter(function(c) { return Number(w[c.id] || 0) > 0 })
+  }
+
+  property string _correctionCorrigeCandidate: ""
 
   function requestCreateEvaluation() {
     var classId = root.currentCorrectionsClassId()
@@ -760,9 +1023,6 @@ Item {
     if (!classId || !cls) { root.correctionCreateError = "Sélectionnez une classe."; return }
     var title = String(root.correctionDraftTitle || "").trim().slice(0, CorrectionsStore.MAX_TITLE_LEN)
     var folder = root.expandHome(root.correctionDraftFolder).replace(/\/+$/, "")
-    var sujet = root.expandHome(root.correctionDraftSujet)
-    var corrige = root.expandHome(root.correctionDraftCorrige)
-    var agent = root.expandHome(root.correctionDraftAgent)
     var usesGrid = root.correctionDraftGridId !== ""
     // Type d'exercice/surinterprétation/niveau de détail only feed
     // consigne.md, which the grid-first pipeline never reads (see Gabriel,
@@ -771,13 +1031,18 @@ Item {
     if (!usesGrid && !root.correctionDraftExerciseType) { root.correctionCreateError = "Choisissez un type d'exercice."; return }
     if (!title) { root.correctionCreateError = "Donnez un titre au devoir."; return }
     if (!folder) { root.correctionCreateError = "Indiquez le dossier du devoir."; return }
-    // Corrigé is optional: some devoirs have no single correct answer to
-    // hand the agent (ex. une fiche de lecture où chaque élève a lu un
-    // livre différent) — see Gabriel, 2026-09-13.
-    if (!sujet || !agent) {
-      root.correctionCreateError = "Indiquez au moins le sujet et l'agent (le corrigé est facultatif)."
+    if (!root.agentPath) {
+      root.correctionCreateError = "Indiquez le fichier agent.md par défaut via le bouton \"🔄 Synchro\" (en haut du panneau)."
       return
     }
+    // sujet.pdf/corrigé.pdf doivent être rangés sous ces noms exacts dans le
+    // dossier du devoir (Gabriel, 2026-10-03) — plus de champs à remplir à
+    // la main. Sujet est obligatoire ; corrigé reste facultatif (ex. une
+    // fiche de lecture où chaque élève a lu un livre différent) — son
+    // existence est testée juste après, sans faire échouer la création s'il
+    // est absent.
+    var sujet = folder + "/sujet.pdf"
+    var agent = root.expandHome(root.agentPath)
     var consignesText = usesGrid ? "" : ConsignesBuilder.build({
       exerciseType: root.correctionDraftExerciseType,
       natureEvaluation: root.correctionDraftNature,
@@ -787,15 +1052,15 @@ Item {
       bienveillance: root.correctionDraftBienveillance,
       priseDeNotes: root.correctionDraftPriseDeNotes,
       completudeExigee: root.correctionDraftCompletudeExigee,
-      ecartSevereBienveillante: root.correctionDraftEcart,
       surinterpretation: root.correctionDraftSurinterpretation,
       niveauDetail: root.correctionDraftNiveauDetail,
       complements: root.correctionDraftComplements,
-      fixedBlock: root.fixedConsignesBlockFor(root.correctionDraftExerciseType)
+      notee: root.correctionDraftNotee,
+      bareme: root.correctionDraftBareme
     })
     root._pendingCorrectionDraft = {
       classId: classId, title: title, folder: folder,
-      sujet: sujet, corrige: corrige, agent: agent,
+      sujet: sujet, corrige: "", agent: agent,
       consignesPath: folder + "/consigne.md", consignesText: consignesText,
       exerciseType: root.correctionDraftExerciseType,
       gridId: root.correctionDraftGridId,
@@ -807,26 +1072,48 @@ Item {
       bienveillance: root.correctionDraftBienveillance,
       priseDeNotes: root.correctionDraftPriseDeNotes,
       completudeExigee: root.correctionDraftCompletudeExigee,
-      ecartSevereBienveillante: root.correctionDraftEcart,
       surinterpretation: root.correctionDraftSurinterpretation,
       niveauDetail: root.correctionDraftNiveauDetail,
       complements: root.correctionDraftComplements,
+      structMethode: root.correctionDraftStructMethode,
+      structContenu: root.correctionDraftStructContenu,
+      structLangue: root.correctionDraftStructLangue,
+      methodeCriteres: root.correctionDraftMethodeCriteres,
+      contenuCriteres: root.correctionDraftContenuCriteres,
+      langueCriteres: root.correctionDraftLangueCriteres,
+      criteriaPoints: root.correctionDraftCriteriaPoints,
+      notee: root.correctionDraftNotee,
+      bareme: root.correctionDraftBareme,
       writingMode: root.correctionDraftWritingMode, writingExceptions: root.correctionDraftWritingExceptions
     }
     root.correctionCreating = true
     root.correctionCreateError = ""
-    // Each path is checked with its own plain `test` invocation (argv
-    // only, no shell) — chained one at a time rather than combined into a
-    // single script string. consigne.md itself isn't checked here: it
-    // doesn't exist yet (see finishCorrectionCreation() below, which checks
-    // for a pre-existing file at that generated path before writing it).
-    root._correctionValidateQueue = [
-      { flag: "-d", path: folder },
-      { flag: "-f", path: sujet },
-      { flag: "-f", path: agent }
-    ]
-    if (corrige) root._correctionValidateQueue.push({ flag: "-f", path: corrige })
-    root.runNextCorrectionValidation()
+    root._correctionCorrigeCandidate = folder + "/corrigé.pdf"
+    correctionCorrigeCheckProc.command = ["test", "-f", root._correctionCorrigeCandidate]
+    correctionCorrigeCheckProc.running = false
+    correctionCorrigeCheckProc.running = true
+  }
+
+  // corrigé.pdf's existence is checked on its own, outside the mandatory
+  // queue below: unlike dossier/sujet/agent, its ABSENCE isn't an error —
+  // see requestCreateEvaluation().
+  Process {
+    id: correctionCorrigeCheckProc
+    onExited: function(exitCode) {
+      if (!root._pendingCorrectionDraft) return
+      if (exitCode === 0) root._pendingCorrectionDraft.corrige = root._correctionCorrigeCandidate
+      // Each path is checked with its own plain `test` invocation (argv
+      // only, no shell) — chained one at a time rather than combined into a
+      // single script string. consigne.md itself isn't checked here: it
+      // doesn't exist yet (see finishCorrectionCreation() below, which checks
+      // for a pre-existing file at that generated path before writing it).
+      root._correctionValidateQueue = [
+        { flag: "-d", path: root._pendingCorrectionDraft.folder },
+        { flag: "-f", path: root._pendingCorrectionDraft.sujet },
+        { flag: "-f", path: root._pendingCorrectionDraft.agent }
+      ]
+      root.runNextCorrectionValidation()
+    }
   }
 
   function runNextCorrectionValidation() {
@@ -852,7 +1139,7 @@ Item {
         root.correctionCreating = false
         root._pendingCorrectionDraft = null
         root._correctionValidateQueue = []
-        root.correctionCreateError = "Chemin(s) introuvable(s) — vérifiez le dossier du devoir, le sujet, l'agent, et le corrigé si vous en avez indiqué un."
+        root.correctionCreateError = "Chemin(s) introuvable(s) — vérifiez le dossier du devoir (doit contenir sujet.pdf), et le fichier agent.md configuré dans les réglages."
         return
       }
       root.runNextCorrectionValidation()
@@ -920,9 +1207,13 @@ Item {
       natureEvaluation: d.natureEvaluation, typeEvaluation: d.typeEvaluation,
       dureeEpreuve: d.dureeEpreuve, niveauClasse: d.niveauClasse,
       bienveillance: d.bienveillance, priseDeNotes: d.priseDeNotes,
-      completudeExigee: d.completudeExigee, ecartSevereBienveillante: d.ecartSevereBienveillante,
+      completudeExigee: d.completudeExigee,
       surinterpretation: d.surinterpretation, niveauDetail: d.niveauDetail,
-      complements: d.complements
+      complements: d.complements,
+      structMethode: d.structMethode, structContenu: d.structContenu, structLangue: d.structLangue,
+      methodeCriteres: d.methodeCriteres, contenuCriteres: d.contenuCriteres, langueCriteres: d.langueCriteres,
+      criteriaPoints: d.criteriaPoints,
+      notee: d.notee, bareme: d.bareme
     })
     root.corrections = CorrectionsStore.setEvaluation(root.corrections, d.classId, evaluation)
     root.persistCorrections()
@@ -1132,7 +1423,17 @@ Item {
       usesPlanExtraction: ExerciseTypes.usesPlanExtraction(ev.exerciseType),
       niveauDetail: ev.niveauDetail,
       niveauClasse: ev.niveauClasse,
-      bienveillance: ev.bienveillance
+      bienveillance: ev.bienveillance,
+      structMethode: ev.structMethode,
+      structContenu: ev.structContenu,
+      structLangue: ev.structLangue,
+      methodeCriteres: ev.methodeCriteres,
+      contenuCriteres: ev.contenuCriteres,
+      langueCriteres: ev.langueCriteres,
+      notee: ev.notee,
+      weightedCriteres: root.weightedCriteresFrom(
+        root.flattenCriteres(ev.structMethode, ev.methodeCriteres, ev.structContenu, ev.contenuCriteres, ev.structLangue, ev.langueCriteres),
+        ev.criteriaPoints)
     })
 
     root._correctionStderr = ""
@@ -1218,17 +1519,57 @@ Item {
   function finalizeCorrectionSuccess(logTextRaw, notesTextRaw) {
     var ctx = root._correctionRunContext
     if (!ctx) return
+    var ev = CorrectionsStore.getEvaluation(root.corrections, ctx.classId)
     var appreciation = (root._correctionAppreciationText || "").trim()
     var logTrim = String(logTextRaw || "").trim()
-    var grades = CorrectionPromptBuilder.parseGrades(notesTextRaw)
     var lisibilite = CorrectionPromptBuilder.parseLisibilite(notesTextRaw)
+    // Weighted critères (Gabriel, 2026-10-03) → a deterministic note from
+    // palier × points (CompetencyGrids.computeWeightedNote(), same function
+    // the grid-first pipeline already uses — never the agent's own
+    // arithmetic for a real grade), carried identically by all three named
+    // grades so the rest of this function/the review UI doesn't need to
+    // change shape. No weighted critère → the older free severe/neutre/
+    // bienveillante proposal, unchanged.
+    var weighted = ev ? root.weightedCriteresFrom(
+      root.flattenCriteres(ev.structMethode, ev.methodeCriteres, ev.structContenu, ev.contenuCriteres, ev.structLangue, ev.langueCriteres),
+      ev.criteriaPoints) : []
+    var grades
+    // Paliers attribués (Gabriel, 2026-10-03: "il faudrait qu'il indique
+    // quel palier il a attribué à chacun des critères") — built from the
+    // SAME parsed `checks` the note was computed from, never a second,
+    // independent self-report by the agent: the log must always match
+    // exactly what the note was actually calculated from.
+    var palierLog = ""
+    if (weighted.length > 0) {
+      var checks = CorrectionPromptBuilder.parseCriteriaPaliers(notesTextRaw, weighted)
+      var weights = {}
+      weighted.forEach(function(c, idx) { weights[idx] = Number((ev.criteriaPoints || {})[c.id] || 0) })
+      var pseudoGrid = { rows: weighted.map(function(c) { return { checkable: true, text: c.text } }) }
+      var computed = CompetencyGrids.computeWeightedNote(pseudoGrid, checks, weights)
+      grades = { severe: computed.severe, neutre: computed.severe, bienveillante: computed.bienveillante }
+      var palierLines = ["## Paliers attribués"]
+      weighted.forEach(function(c, idx) {
+        var level = checks[idx]
+        var label = (level === undefined || level === null) ? "non évalué" : ("Palier " + (level + 1) + "/4")
+        palierLines.push("- [" + c.label + "] " + c.text + " : " + label)
+      })
+      palierLog = palierLines.join("\n")
+    } else {
+      grades = CorrectionPromptBuilder.parseGrades(notesTextRaw)
+    }
     // An illisible copy always needs review, even if the agent's log
     // otherwise says RAS — Gabriel should never rely on an appreciation the
-    // agent itself flagged as guesswork.
-    var needsReview = (logTrim !== "" && logTrim.toUpperCase() !== "RAS") || lisibilite === "illisible"
+    // agent itself flagged as guesswork. The paliers breakdown is routine
+    // info, not a vigilance signal — it's folded into the displayed log
+    // text below but deliberately left OUT of needsReview, unlike the
+    // "Plan restitué" section which does count (usesPlanExtraction, see
+    // CorrectionPromptBuilder.build()).
+    var vigilanceLog = (logTrim !== "" && logTrim.toUpperCase() !== "RAS") ? logTrim : ""
+    var needsReview = vigilanceLog !== "" || lisibilite === "illisible"
+    var displayedLog = palierLog ? (palierLog + (vigilanceLog ? "\n\n" + vigilanceLog : "")) : vigilanceLog
     root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, {
       status: "done", appreciation: appreciation,
-      log: (logTrim !== "" && logTrim.toUpperCase() !== "RAS") ? logTrim : "", needsReview: needsReview, error: "",
+      log: displayedLog, needsReview: needsReview, error: "",
       reviewed: false, // a fresh (or re-run) correction always starts unreviewed
       grades: grades, selectedGrade: "", // fresh grades need a fresh validation
       addendum: "", // one-shot: consumed by the run that just succeeded
@@ -1899,7 +2240,6 @@ Item {
   // file itself is left on disk, unwired, rather than deleted (this plugin
   // has uncommitted work, so there's no git history to recover it from).
 
-  property bool agentWizardOpen: false
 
   // ---- final Typst export placeholder (waiting on the sticker-sheet
   // template, same status as addAppreciationToLabelSheet() above) --------
@@ -2742,13 +3082,14 @@ Item {
         blocked: methodeField.activeFocus || contenuField.activeFocus || expressionField.activeFocus
           || travailField.activeFocus || comportementField.activeFocus || axeField.activeFocus
           || correctionTitleField.activeFocus || correctionFolderField.activeFocus
-          || correctionSujetField.activeFocus || correctionCorrigeField.activeFocus
-          || correctionAgentField.activeFocus || correctionComplementsField.activeFocus
+          || evalTemplateSaveField.activeFocus
+          || methodeCritereField.activeFocus || contenuCritereField.activeFocus || langueCritereField.activeFocus
+          || correctionComplementsField.activeFocus
           || evaluationIntituleField.activeFocus || evaluationAppreciationField.activeFocus
           || evaluationAnnotationsPositifField.activeFocus || evaluationAnnotationsNegatifField.activeFocus
           || root.classSettingsOpen || root.incompatOpen || root.pathBarMode !== ""
           || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen || root.syncSettingsOpen
-          || root.agentWizardOpen || root.correctionReplaceConfirmOpen
+          || root.correctionReplaceConfirmOpen
           || root.correctionConsignesOverwriteConfirmOpen
           || root.correctionWritingPopoverOpen
           || root.correctionLogPopoverStudentId !== ""
@@ -2862,7 +3203,7 @@ Item {
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                tooltipText: root.syncDir !== "" ? ("Synchronisée vers : " + root.syncDir) : "Synchronisation désactivée"
+                tooltipText: (root.syncDir !== "" ? ("Synchronisée vers : " + root.syncDir) : "Synchronisation désactivée") + " · Agent par défaut : " + (root.agentPath || "non configuré")
                 onClicked: root.openSyncSettings()
               }
             }
@@ -3632,6 +3973,48 @@ Item {
                   }
 
                   Column {
+                    visible: root.evalTemplates.length > 0
+                    width: parent.width
+                    spacing: Style.spacing.xxs
+                    Text { text: "Charger un modèle"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                    Dropdown {
+                      width: parent.width
+                      options: [{ value: "", label: "— Choisir un modèle enregistré —" }].concat(root.evalTemplates.map(function(t) { return { value: t.id, label: t.name } }))
+                      value: ""
+                      foreground: root.foreground
+                      background: root.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onChanged: function(v) { if (v) root.applyEvalTemplate(v) }
+                    }
+                  }
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.spacing.controlGap
+                    TextField {
+                      id: evalTemplateSaveField
+                      width: parent.width - Style.space(220)
+                      placeholderText: "Nom du modèle à enregistrer…"
+                      foreground: root.foreground
+                      accent: root.accent
+                      maximumLength: 160
+                      text: root.evalTemplateSaveName
+                      onTextChanged: root.evalTemplateSaveName = text
+                    }
+                    Button {
+                      text: "💾 Enregistrer comme modèle"
+                      bordered: true
+                      enabled: root.evalTemplateSaveName.trim() !== ""
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: { root.requestSaveEvalTemplate(); evalTemplateSaveField.text = "" }
+                    }
+                  }
+
+                  PanelSeparator { foreground: root.foreground; width: parent.width }
+
+                  Column {
                     visible: root.correctionDraftGridId === ""
                     width: parent.width
                     spacing: Style.spacing.xxs
@@ -3644,12 +4027,12 @@ Item {
                       background: root.background
                       accent: root.accent
                       fontFamily: root.fontFamily
-                      onChanged: function(v) { root.correctionDraftExerciseType = v }
+                      onChanged: function(v) { root.correctionDraftExerciseType = v; root.applyStructureDefaultsForType(v) }
                     }
                     Text {
-                      visible: root.correctionDraftExerciseType !== "" && !ExerciseTypes.hasTemplate(root.correctionDraftExerciseType)
+                      visible: root.correctionDraftExerciseType !== ""
                       width: parent.width
-                      text: "Aucun gabarit de consignes n'est encore rédigé pour ce type d'exercice — les compléments ci-dessous devront porter l'intégralité des attentes."
+                      text: "Aucun gabarit de consignes n'est écrit pour ce type d'exercice — les compléments ci-dessous devront porter l'intégralité des attentes (le barème a sa propre case plus bas)."
                       color: Qt.darker(root.foreground, 1.4)
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
@@ -3751,36 +4134,13 @@ Item {
                     }
                   }
 
-                  Column {
+                  Text {
                     width: parent.width
-                    spacing: Style.spacing.xxs
-                    Text { text: "Sujet (PDF)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-                    TextField {
-                      id: correctionSujetField
-                      width: parent.width
-                      text: root.correctionDraftSujet
-                      placeholderText: "chemin du fichier .pdf…"
-                      foreground: root.foreground
-                      accent: root.accent
-                      maximumLength: 2000
-                      onTextChanged: root.correctionDraftSujet = text
-                    }
-                  }
-
-                  Column {
-                    width: parent.width
-                    spacing: Style.spacing.xxs
-                    Text { text: "Corrigé (PDF) — facultatif"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-                    TextField {
-                      id: correctionCorrigeField
-                      width: parent.width
-                      text: root.correctionDraftCorrige
-                      placeholderText: "chemin du fichier .pdf…"
-                      foreground: root.foreground
-                      accent: root.accent
-                      maximumLength: 2000
-                      onTextChanged: root.correctionDraftCorrige = text
-                    }
+                    text: "Le sujet et le corrigé sont retrouvés automatiquement dans le dossier ci-dessus, sous les noms \"sujet.pdf\" (obligatoire) et \"corrigé.pdf\" (facultatif)."
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
                   }
 
                   PanelSeparator { foreground: root.foreground; width: parent.width }
@@ -3886,21 +4246,6 @@ Item {
                       onClicked: root.correctionDraftCompletudeExigee = !root.correctionDraftCompletudeExigee
                     }
 
-                    Column {
-                      visible: root.correctionDraftGridId === ""
-                      width: parent.width
-                      spacing: Style.spacing.xxs
-                      Text { text: "Écart sévère / bienveillante : " + root.correctionDraftEcart.toFixed(1) + " pts (neutre = moyenne)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-                      PanelSlider {
-                        width: parent.width
-                        bar: null
-                        minimum: 0.5
-                        maximum: 3
-                        step: 0.5
-                        value: root.correctionDraftEcart
-                        onMoved: function(v) { root.correctionDraftEcart = Math.round(v * 2) / 2 }
-                      }
-                    }
 
                     Dropdown {
                       visible: root.correctionDraftGridId === ""
@@ -3926,6 +4271,286 @@ Item {
                       accent: root.accent
                       fontFamily: root.fontFamily
                       onChanged: function(v) { root.correctionDraftNiveauDetail = v }
+                    }
+                  }
+
+                  // ---- structure de l'appréciation (pipeline sans grille) ----
+                  // Gabriel, 2026-10-03: chaque partie est désormais optionnelle
+                  // plutôt qu'imposée — voir CorrectionPromptBuilder.build() et
+                  // applyStructureDefaultsForType() pour la précoche par type.
+
+                  Column {
+                    visible: root.correctionDraftGridId === ""
+                    width: parent.width
+                    spacing: Style.spacing.md
+                    Text { text: "Structure de l'appréciation"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+
+                    Toggle {
+                      width: parent.width
+                      label: "Partie \"Méthode\""
+                      description: "Organisation, démarche, structure du devoir — pertinent pour un exercice en rédaction continue (commentaire, dissertation, essai...), pas pour un questionnaire."
+                      checked: root.correctionDraftStructMethode
+                      foreground: root.foreground
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onClicked: root.correctionDraftStructMethode = !root.correctionDraftStructMethode
+                    }
+                    Column {
+                      visible: root.correctionDraftStructMethode
+                      width: parent.width
+                      spacing: Style.spacing.xxs
+                      Repeater {
+                        width: parent.width
+                        model: root.correctionDraftMethodeCriteres
+                        Row {
+                          width: parent.width
+                          spacing: Style.spacing.controlGap
+                          Text {
+                            width: parent.width - (root.correctionDraftNotee ? Style.space(170) : Style.space(40))
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "• " + modelData.text
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                            wrapMode: Text.WordWrap
+                          }
+                          NumberField {
+                            visible: root.correctionDraftNotee
+                            width: Style.space(110)
+                            value: root.correctionDraftCriteriaPoints[modelData.id] || 0
+                            from: 0
+                            to: 20
+                            stepSize: 1
+                            foreground: root.foreground
+                            accent: root.accent
+                            fontFamily: root.fontFamily
+                            onModified: function(v) { root.setCriterionPoints(modelData.id, v) }
+                          }
+                          Button {
+                            text: "✕"
+                            bordered: true
+                            foreground: root.foreground
+                            accent: root.accent
+                            onClicked: root.removeCritere("methode", modelData.id)
+                          }
+                        }
+                      }
+                      Row {
+                        width: parent.width
+                        spacing: Style.spacing.controlGap
+                        TextField {
+                          id: methodeCritereField
+                          width: parent.width - Style.space(140)
+                          placeholderText: "Ajouter un critère précis…"
+                          foreground: root.foreground
+                          accent: root.accent
+                          maximumLength: 500
+                          Keys.onReturnPressed: { root.addCritere("methode", text); text = "" }
+                        }
+                        Button {
+                          text: "Ajouter le critère"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          onClicked: { root.addCritere("methode", methodeCritereField.text); methodeCritereField.text = "" }
+                        }
+                      }
+                    }
+
+                    Toggle {
+                      width: parent.width
+                      label: "Partie \"Contenu\""
+                      description: "Compréhension, analyse, interprétation du texte."
+                      checked: root.correctionDraftStructContenu
+                      foreground: root.foreground
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onClicked: root.correctionDraftStructContenu = !root.correctionDraftStructContenu
+                    }
+                    Column {
+                      visible: root.correctionDraftStructContenu
+                      width: parent.width
+                      spacing: Style.spacing.xxs
+                      Repeater {
+                        width: parent.width
+                        model: root.correctionDraftContenuCriteres
+                        Row {
+                          width: parent.width
+                          spacing: Style.spacing.controlGap
+                          Text {
+                            width: parent.width - (root.correctionDraftNotee ? Style.space(170) : Style.space(40))
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "• " + modelData.text
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                            wrapMode: Text.WordWrap
+                          }
+                          NumberField {
+                            visible: root.correctionDraftNotee
+                            width: Style.space(110)
+                            value: root.correctionDraftCriteriaPoints[modelData.id] || 0
+                            from: 0
+                            to: 20
+                            stepSize: 1
+                            foreground: root.foreground
+                            accent: root.accent
+                            fontFamily: root.fontFamily
+                            onModified: function(v) { root.setCriterionPoints(modelData.id, v) }
+                          }
+                          Button {
+                            text: "✕"
+                            bordered: true
+                            foreground: root.foreground
+                            accent: root.accent
+                            onClicked: root.removeCritere("contenu", modelData.id)
+                          }
+                        }
+                      }
+                      Row {
+                        width: parent.width
+                        spacing: Style.spacing.controlGap
+                        TextField {
+                          id: contenuCritereField
+                          width: parent.width - Style.space(140)
+                          placeholderText: "Ajouter un critère précis…"
+                          foreground: root.foreground
+                          accent: root.accent
+                          maximumLength: 500
+                          Keys.onReturnPressed: { root.addCritere("contenu", text); text = "" }
+                        }
+                        Button {
+                          text: "Ajouter le critère"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          onClicked: { root.addCritere("contenu", contenuCritereField.text); contenuCritereField.text = "" }
+                        }
+                      }
+                    }
+
+                    Toggle {
+                      width: parent.width
+                      label: "Partie \"Expression écrite\""
+                      description: "Langue, orthographe, style, niveau de langue."
+                      checked: root.correctionDraftStructLangue
+                      foreground: root.foreground
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onClicked: root.correctionDraftStructLangue = !root.correctionDraftStructLangue
+                    }
+                    Column {
+                      visible: root.correctionDraftStructLangue
+                      width: parent.width
+                      spacing: Style.spacing.xxs
+                      Repeater {
+                        width: parent.width
+                        model: root.correctionDraftLangueCriteres
+                        Row {
+                          width: parent.width
+                          spacing: Style.spacing.controlGap
+                          Text {
+                            width: parent.width - (root.correctionDraftNotee ? Style.space(170) : Style.space(40))
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "• " + modelData.text
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                            wrapMode: Text.WordWrap
+                          }
+                          NumberField {
+                            visible: root.correctionDraftNotee
+                            width: Style.space(110)
+                            value: root.correctionDraftCriteriaPoints[modelData.id] || 0
+                            from: 0
+                            to: 20
+                            stepSize: 1
+                            foreground: root.foreground
+                            accent: root.accent
+                            fontFamily: root.fontFamily
+                            onModified: function(v) { root.setCriterionPoints(modelData.id, v) }
+                          }
+                          Button {
+                            text: "✕"
+                            bordered: true
+                            foreground: root.foreground
+                            accent: root.accent
+                            onClicked: root.removeCritere("langue", modelData.id)
+                          }
+                        }
+                      }
+                      Row {
+                        width: parent.width
+                        spacing: Style.spacing.controlGap
+                        TextField {
+                          id: langueCritereField
+                          width: parent.width - Style.space(140)
+                          placeholderText: "Ajouter un critère précis…"
+                          foreground: root.foreground
+                          accent: root.accent
+                          maximumLength: 500
+                          Keys.onReturnPressed: { root.addCritere("langue", text); text = "" }
+                        }
+                        Button {
+                          text: "Ajouter le critère"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          onClicked: { root.addCritere("langue", langueCritereField.text); langueCritereField.text = "" }
+                        }
+                      }
+                    }
+
+                    Toggle {
+                      width: parent.width
+                      label: "Évaluation notée ?"
+                      description: "Décoché, l'agent ne propose aucune note (N/A) pour ces copies."
+                      checked: root.correctionDraftNotee
+                      foreground: root.foreground
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onClicked: root.correctionDraftNotee = !root.correctionDraftNotee
+                    }
+                    Text {
+                      visible: root.correctionDraftNotee
+                      width: parent.width
+                      text: "Un critère sans points n'est pas noté (juste un point à vérifier dans la prose). Pour un critère pondéré : Palier 1 = 0 pt, Palier 2 = 1/3 des points, Palier 3 = 2/3, Palier 4 = la totalité — la note finale est la somme sur /20. Sans aucun critère pondéré, l'agent revient à proposer librement trois notes (sévère/neutre/bienveillante), calibrées par le barème ci-dessous."
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.italic: true
+                      wrapMode: Text.WordWrap
+                    }
+                    Column {
+                      visible: root.correctionDraftNotee
+                      width: parent.width
+                      spacing: Style.spacing.xxs
+                      Text { text: "Barème"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                      Rectangle {
+                        width: parent.width
+                        height: Style.space(88)
+                        radius: Style.cornerRadius
+                        color: Style.normalFillFor(root.foreground, root.accent)
+                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                        border.width: 1
+                        ScrollView {
+                          anchors.fill: parent
+                          anchors.margins: Style.space(6)
+                          clip: true
+                          ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                          TextArea {
+                            id: correctionBaremeField
+                            wrapMode: TextArea.Wrap
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            background: null
+                            text: root.correctionDraftBareme
+                            placeholderText: "Paliers ou barème indicatif, pour calibrer les notes proposées…"
+                            onTextChanged: root.correctionDraftBareme = text
+                          }
+                        }
+                      }
                     }
                   }
 
@@ -3962,38 +4587,13 @@ Item {
 
                   PanelSeparator { foreground: root.foreground; width: parent.width }
 
-                  Column {
+                  Text {
                     width: parent.width
-                    spacing: Style.spacing.xxs
-                    Text { text: "Agent (markdown)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-                    Item {
-                      width: parent.width
-                      height: Math.max(correctionAgentField.implicitHeight, agentWizardButton.implicitHeight)
-
-                      TextField {
-                        id: correctionAgentField
-                        anchors.left: parent.left
-                        anchors.right: agentWizardButton.left
-                        anchors.rightMargin: Style.spacing.controlGap
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.correctionDraftAgent
-                        placeholderText: "chemin du fichier .md…"
-                        foreground: root.foreground
-                        accent: root.accent
-                        maximumLength: 2000
-                        onTextChanged: root.correctionDraftAgent = text
-                      }
-                      Button {
-                        id: agentWizardButton
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "🪄 Générer"
-                        bordered: true
-                        foreground: root.foreground
-                        accent: root.accent
-                        onClicked: root.agentWizardOpen = true
-                      }
-                    }
+                    text: "Agent (markdown) : " + (root.agentPath || "non configuré") + " — réglage global, voir le bouton \"🔄 Synchro\" en haut."
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WrapAnywhere
                   }
 
                   Text {
@@ -4102,6 +4702,17 @@ Item {
                         foreground: root.foreground
                         accent: root.accent
                         onClicked: root.openWeightsPopover()
+                      }
+                      Dropdown {
+                        visible: !!(root.activeEvaluation() && !root.activeEvaluation().gridId)
+                        width: Style.space(160)
+                        options: ConsignesBuilder.DETAIL_OPTIONS
+                        value: root.activeEvaluation() ? root.activeEvaluation().niveauDetail : "moyen"
+                        foreground: root.foreground
+                        background: root.background
+                        accent: root.accent
+                        fontFamily: root.fontFamily
+                        onChanged: function(v) { root.setEvaluationNiveauDetail(v) }
                       }
                       Button {
                         text: "🆕 Nouvelle évaluation"
@@ -5222,12 +5833,14 @@ Item {
         anchors.fill: parent
         opened: root.syncSettingsOpen
         currentDir: root.syncDir
+        currentAgentPath: root.agentPath
         foreground: root.foreground
         background: root.background
         accent: root.accent
         fontFamily: root.fontFamily
         onDirConfirmed: function(dir) { root.confirmSyncDir(dir) }
         onDirCleared: root.clearSyncDir()
+        onAgentConfirmed: function(path) { root.setAgentPath(path) }
         onCanceled: root.closeSyncSettings()
       }
 
@@ -5245,16 +5858,6 @@ Item {
         onCanceled: root.closeIncompat()
       }
 
-      WizardPlaceholderPopover {
-        anchors.fill: parent
-        opened: root.agentWizardOpen
-        title: "Assistant — Agent"
-        foreground: root.foreground
-        background: root.background
-        accent: root.accent
-        fontFamily: root.fontFamily
-        onCanceled: root.agentWizardOpen = false
-      }
 
       WritingModePopover {
         anchors.fill: parent

@@ -14,6 +14,10 @@ Item {
 
   property bool opened: false
   property string currentDir: ""
+  // agent.md's global path (Gabriel, 2026-10-03) — set once here instead of
+  // per-évaluation; unrelated to sync but this is the plugin's only
+  // settings surface today, see Panel.qml's header comment on agentPath.
+  property string currentAgentPath: ""
   property color foreground: Color.foreground
   property color background: Color.background
   property color accent: Color.accent
@@ -21,6 +25,7 @@ Item {
 
   signal dirConfirmed(string dir)
   signal dirCleared()
+  signal agentConfirmed(string path)
   signal canceled()
 
   visible: opened
@@ -28,6 +33,7 @@ Item {
 
   onOpenedChanged: if (opened) {
     dirField.text = root.currentDir
+    agentField.text = root.currentAgentPath
     Qt.callLater(function() { dirField.forceActiveFocus() })
   }
 
@@ -129,6 +135,45 @@ Item {
             accent: root.accent
             onClicked: root.canceled()
           }
+        }
+
+        Text {
+          text: "Agent de correction par défaut"
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.title
+          font.bold: true
+          width: parent.width
+        }
+
+        Text {
+          text: "Un seul fichier agent.md, appliqué à toute nouvelle évaluation (Corrections) — plus besoin de le repointer chaque fois."
+          color: Qt.darker(root.foreground, 1.6)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.italic: true
+          wrapMode: Text.WordWrap
+          width: parent.width
+        }
+
+        TextField {
+          id: agentField
+          width: parent.width
+          placeholderText: "chemin du fichier agent.md…"
+          foreground: root.foreground
+          accent: root.accent
+          maximumLength: 1024
+          Keys.onReturnPressed: root.agentConfirmed(agentField.text.trim())
+          Keys.onEnterPressed: root.agentConfirmed(agentField.text.trim())
+          Keys.onEscapePressed: root.canceled()
+        }
+
+        Button {
+          text: "Valider l'agent"
+          bordered: true
+          foreground: root.foreground
+          accent: root.accent
+          onClicked: root.agentConfirmed(agentField.text.trim())
         }
       }
     }

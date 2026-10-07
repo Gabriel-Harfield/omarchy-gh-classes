@@ -2308,13 +2308,27 @@ Item {
     return (s && s.competencyGrids && s.competencyGrids[root.evaluationGridId]) || null
   }
 
-  // Gabriel, 2026-10-03: lets him spot an absent/forgotten student at a
-  // glance in the "Élève" dropdown while correcting a whole class — "corrigé"
-  // means an appreciation has actually been written for this grid, same
-  // idiom as the Corrections tab's own entry.appreciation !== "" check.
+  // Gabriel, 2026-10-03, redefined 2026-10-07: lets him spot an
+  // absent/forgotten student at a glance in the "Élève" dropdown while
+  // correcting a whole class — "corrigé" means every checkable row of the
+  // CURRENT grid has a level checked. Checked against the actual binôme
+  // data (plenty of pairs with a fully-checked grid but no written
+  // appréciation — that text stays optional for this tab), not the
+  // Corrections tab's own entry.appreciation !== "" idiom, which doesn't
+  // fit here. Same checks object both binôme partners share (mirrored by
+  // _evalWriteEntry), so this naturally marks both of them done together.
   function evaluationStudentDone(student) {
+    var grid = root.activeEvaluationGrid()
     var entry = student && student.competencyGrids && student.competencyGrids[root.evaluationGridId]
-    return !!(entry && String(entry.appreciation || "").trim() !== "")
+    if (!grid || !entry) return false
+    var checks = entry.checks || {}
+    var anyCheckable = false
+    for (var i = 0; i < grid.rows.length; i++) {
+      if (!grid.rows[i].checkable) continue
+      anyCheckable = true
+      if (checks[i] === undefined || checks[i] === null) return false
+    }
+    return anyCheckable
   }
 
   // ---- binômes (Gabriel, 2026-10-06) ------------------------------------

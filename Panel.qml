@@ -2308,6 +2308,15 @@ Item {
     return (s && s.competencyGrids && s.competencyGrids[root.evaluationGridId]) || null
   }
 
+  // Gabriel, 2026-10-03: lets him spot an absent/forgotten student at a
+  // glance in the "Élève" dropdown while correcting a whole class — "corrigé"
+  // means an appreciation has actually been written for this grid, same
+  // idiom as the Corrections tab's own entry.appreciation !== "" check.
+  function evaluationStudentDone(student) {
+    var entry = student && student.competencyGrids && student.competencyGrids[root.evaluationGridId]
+    return !!(entry && String(entry.appreciation || "").trim() !== "")
+  }
+
   // Unlike checks/appreciation/note, the intitulé (assignment title) lives
   // on the Class, not the Student — it's the same for every student
   // evaluated on this grid, typed once rather than retyped per student.
@@ -2807,10 +2816,6 @@ Item {
   // low-friction convention as "Régénérer l'appréciation" elsewhere.
   property bool evalGeneratingAppreciation: false
   property string evalGenAppreciationError: ""
-  // "courte"/"moyenne"/"longue" — same length options as the Corrections
-  // tab's own regenerate dropdown, persists across students/grids within
-  // the session (not saved to disk, purely a generation-time preference).
-  property string evaluationAppreciationLength: "moyenne"
 
   function requestGenerateEvalAppreciation() {
     var grid = root.activeEvaluationGrid()
@@ -2818,7 +2823,7 @@ Item {
     if (!grid || !student) return
     var entry = root.evaluationGridEntry()
     var checks = entry ? entry.checks : {}
-    var prompt = PromptBuilder.buildEvalCompetencesAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, checks, evaluationAnnotationsPositifField.text, evaluationAnnotationsNegatifField.text, root.evaluationAppreciationLength)
+    var prompt = PromptBuilder.buildEvalCompetencesAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, checks, evaluationAnnotationsPositifField.text, evaluationAnnotationsNegatifField.text)
     root.evalGeneratingAppreciation = true
     root.evalGenAppreciationError = ""
     evalGenAppreciationProc.command = ClaudeRunner.buildCommand(prompt)
@@ -5026,7 +5031,7 @@ Item {
                     label: "Élève"
                     options: [{ value: "", label: "— Sélectionner un élève —" }].concat(
                       root.activeClass()
-                        ? root.activeClass().students.map(function(s) { return { value: s.id, label: Store.studentLabel(s) } })
+                        ? root.activeClass().students.map(function(s) { return { value: s.id, label: (root.evaluationStudentDone(s) ? "✅ " : "") + Store.studentLabel(s) } })
                         : []
                     )
                     value: root.evaluationStudentId
@@ -5495,23 +5500,6 @@ Item {
                       accent: root.accent
                       tooltipText: "Remplace le texte actuel de l'Appréciation ci-dessus, à partir de la grille et des annotations"
                       onClicked: root.requestGenerateEvalAppreciation()
-                    }
-
-                    Dropdown {
-                      anchors.verticalCenter: parent.verticalCenter
-                      label: "Longueur"
-                      width: Style.space(120)
-                      options: [
-                        { value: "courte", label: "Courte" },
-                        { value: "moyenne", label: "Moyenne" },
-                        { value: "longue", label: "Longue" }
-                      ]
-                      value: root.evaluationAppreciationLength
-                      foreground: root.foreground
-                      background: root.background
-                      accent: root.accent
-                      fontFamily: root.fontFamily
-                      onChanged: function(v) { root.evaluationAppreciationLength = v }
                     }
 
                     Button {

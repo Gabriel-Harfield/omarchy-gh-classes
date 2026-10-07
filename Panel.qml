@@ -2308,6 +2308,150 @@ Item {
     return (s && s.competencyGrids && s.competencyGrids[root.evaluationGridId]) || null
   }
 
+  // ---- binômes (Gabriel, 2026-10-06) ------------------------------------
+  // Pair work: two students share ONE evaluation on the current grid. The
+  // link lives in each partner's grid entry (Store.js's binome/binomeAt),
+  // so it's scoped to this grid and disappears with "🗑 Réinitialiser la
+  // classe" like the rest of the entry. Every write goes through
+  // _evalWriteEntry(), which mirrors the entry onto the partner — they
+  // stay identical until "Aucun" is picked again (dissocier), after which
+  // each keeps its own copy and can diverge.
+
+  function _evalEntryOf(s, gridId) {
+    return (s && s.competencyGrids && s.competencyGrids[gridId]) || null
+  }
+
+  function _findStudent(cls, id) {
+    if (!cls || !id) return null
+    for (var i = 0; i < cls.students.length; i++) if (cls.students[i].id === id) return cls.students[i]
+    return null
+  }
+
+  // A pair only counts when both sides point at each other — a dangling
+  // one-sided link (partner deleted, or half-synced) is ignored.
+  function _evalPartnerIdOf(cls, studentId, gridId) {
+    var entry = root._evalEntryOf(root._findStudent(cls, studentId), gridId)
+    if (!entry || !entry.binome) return ""
+    var partnerEntry = root._evalEntryOf(root._findStudent(cls, entry.binome), gridId)
+    return (partnerEntry && partnerEntry.binome === studentId) ? entry.binome : ""
+  }
+
+  function evaluationPartnerId() {
+    return root._evalPartnerIdOf(root.activeClass(), root.evaluationStudentId, root.evaluationGridId)
+  }
+
+  function evaluationPartner() {
+    return root._findStudent(root.activeClass(), root.evaluationPartnerId())
+  }
+
+  // "Élève 1 / Élève 2" for the export header, or just the student alone.
+  function evaluationStudentsLabel() {
+    var student = root.evaluationStudent()
+    if (!student) return ""
+    var partner = root.evaluationPartner()
+    return Store.studentLabel(student) + (partner ? " / " + Store.studentLabel(partner) : "")
+  }
+
+  function _evalEntryHasData(entry) {
+    if (!entry) return false
+    return Object.keys(entry.checks || {}).length > 0 || !!entry.appreciation || !!entry.annotationsPositif || !!entry.annotationsNegatif
+  }
+
+  function _makeEvalEntry(base, binome, binomeAt) {
+    var b = base || {}
+    var checks = {}
+    Object.keys(b.checks || {}).forEach(function(k) { checks[k] = b.checks[k] })
+    return { checks: checks, appreciation: b.appreciation || "", note: "", annotationsPositif: b.annotationsPositif || "", annotationsNegatif: b.annotationsNegatif || "", binome: binome || "", binomeAt: binomeAt || "" }
+  }
+
+  function _studentWithEvalEntry(s, gridId, entry) {
+    var grids = {}
+    var existingGrids = s.competencyGrids || {}
+    Object.keys(existingGrids).forEach(function(gid) { grids[gid] = existingGrids[gid] })
+    grids[gridId] = entry
+    return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: s.competencyClearedAt }
+  }
+
+  // Writes `entry` (no binome fields needed) for the current student on
+  // the current grid, and the same content onto the partner if paired.
+  // Returns the updated students array; the caller commits it.
+  function _evalWriteEntry(students, entry) {
+    var cls = root.activeClass()
+    var selfId = root.evaluationStudentId
+    var gridId = root.evaluationGridId
+    var partnerId = root._evalPartnerIdOf(cls, selfId, gridId)
+    var current = root._evalEntryOf(root._findStudent(cls, selfId), gridId) || {}
+    return students.map(function(s) {
+      if (s.id === selfId) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(entry, current.binome, current.binomeAt))
+      if (partnerId && s.id === partnerId) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(entry, selfId, current.binomeAt))
+      return s
+    })
+  }
+
+  function _commitEvalStudents(cls, students, intitules) {
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: students, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: intitules !== undefined ? intitules : cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
+    root.classes = Store.replaceClass(root.classes, updatedClass)
+    root.persistClasses()
+    if (root.syncDir) root.runSync()
+  }
+
+  // Classmates offered in the "Binôme" dropdown: everyone not already in
+  // a pair on this grid, plus the current partner.
+  function evaluationPartnerOptions() {
+    var cls = root.activeClass()
+    var out = [{ value: "", label: "— Aucun —" }]
+    if (!cls || !root.evaluationStudentId) return out
+    var currentPartner = root.evaluationPartnerId()
+    cls.students.forEach(function(s) {
+      if (s.id === root.evaluationStudentId) return
+      if (s.id !== currentPartner && root._evalPartnerIdOf(cls, s.id, root.evaluationGridId)) return
+      out.push({ value: s.id, label: Store.studentLabel(s) })
+    })
+    return out
+  }
+
+  property string evaluationPairPendingId: "" // partner awaiting "écraser ?" confirmation
+
+  function setEvaluationPartner(id) {
+    root.flushEvaluationFieldsIfPending()
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationStudentId || id === root.evaluationPartnerId()) return
+    if (id && root._evalEntryHasData(root._evalEntryOf(root._findStudent(cls, id), root.evaluationGridId))) {
+      root.evaluationPairPendingId = id
+      return
+    }
+    root._applyEvaluationPartner(id)
+  }
+
+  function cancelEvaluationPair() { root.evaluationPairPendingId = "" }
+  function confirmEvaluationPair() {
+    var id = root.evaluationPairPendingId
+    root.evaluationPairPendingId = ""
+    root._applyEvaluationPartner(id)
+  }
+
+  // id "" = dissocier. Any previous partner of either student is unlinked
+  // (keeping its own copy of the data); the new partner receives the
+  // current student's evaluation, overwriting its own.
+  function _applyEvaluationPartner(id) {
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationStudentId) return
+    var selfId = root.evaluationStudentId
+    var gridId = root.evaluationGridId
+    var now = new Date().toISOString()
+    var unlink = [root._evalPartnerIdOf(cls, selfId, gridId)]
+    if (id) unlink.push(root._evalPartnerIdOf(cls, id, gridId))
+    var current = root._evalEntryOf(root._findStudent(cls, selfId), gridId)
+    var updatedStudents = cls.students.map(function(s) {
+      if (s.id === selfId) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(current, id, now))
+      if (id && s.id === id) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(current, selfId, now))
+      if (unlink.indexOf(s.id) !== -1) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(root._evalEntryOf(s, gridId), "", now))
+      return s
+    })
+    root._commitEvalStudents(cls, updatedStudents)
+    root.loadEvaluationFields()
+  }
+
   // Unlike checks/appreciation/note, the intitulé (assignment title) lives
   // on the Class, not the Student — it's the same for every student
   // evaluated on this grid, typed once rather than retyped per student.
@@ -2366,7 +2510,10 @@ Item {
     if (root.syncDir) root.runSync()
   }
 
-  // Grading scale for this (classe, grille) — 10 or 20, Gabriel 2026-10-02.
+  // Grading scale for this (classe, grille) — 5/10/15/20 (Gabriel,
+  // 2026-10-02, extended 2026-10-07). Changing it also converts the
+  // "⚖️ Répartir les points" weights to the new scale, so every note on
+  // this grid is recomputed in proportion (see CompetencyGrids.scaleWeights).
   function evaluationBaremeTotal() {
     var cls = root.activeClass()
     var all = (cls && cls.competencyBaremeTotal) || {}
@@ -2379,8 +2526,15 @@ Item {
     var all = {}
     var existingAll = cls.competencyBaremeTotal || {}
     Object.keys(existingAll).forEach(function(gid) { all[gid] = existingAll[gid] })
-    all[root.evaluationGridId] = (Number(total) === 10) ? 10 : 20
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: all }
+    var oldTotal = root.evaluationBaremeTotal()
+    var newTotal = CompetencyGrids.normalizeBaremeTotal(total)
+    if (newTotal === oldTotal) return
+    all[root.evaluationGridId] = newTotal
+    var weights = {}
+    var existingWeights = cls.competencyWeights || {}
+    Object.keys(existingWeights).forEach(function(gid) { weights[gid] = existingWeights[gid] })
+    if (weights[root.evaluationGridId]) weights[root.evaluationGridId] = CompetencyGrids.scaleWeights(weights[root.evaluationGridId], oldTotal, newTotal)
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: cls.students, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: weights, competencyBaremeTotal: all }
     root.classes = Store.replaceClass(root.classes, updatedClass)
     root.persistClasses()
     if (root.syncDir) root.runSync()
@@ -2415,23 +2569,10 @@ Item {
   function setEvaluationCheck(rowIndex, colIndex) {
     var cls = root.activeClass()
     if (!cls || !root.evaluationStudentId) return
-    var updatedStudents = cls.students.map(function(s) {
-      if (s.id !== root.evaluationStudentId) return s
-      var grids = {}
-      var existingGrids = s.competencyGrids || {}
-      Object.keys(existingGrids).forEach(function(gid) { grids[gid] = existingGrids[gid] })
-      var entry = grids[root.evaluationGridId] || { checks: {}, appreciation: "", note: "", annotationsPositif: "", annotationsNegatif: "" }
-      var checks = {}
-      Object.keys(entry.checks || {}).forEach(function(k) { checks[k] = entry.checks[k] })
-      if (checks[rowIndex] === colIndex) delete checks[rowIndex]
-      else checks[rowIndex] = colIndex
-      grids[root.evaluationGridId] = { checks: checks, appreciation: entry.appreciation || "", note: entry.note || "", annotationsPositif: entry.annotationsPositif || "", annotationsNegatif: entry.annotationsNegatif || "" }
-      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: s.competencyClearedAt }
-    })
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
-    root.classes = Store.replaceClass(root.classes, updatedClass)
-    root.persistClasses()
-    if (root.syncDir) root.runSync()
+    var entry = root._makeEvalEntry(root.evaluationGridEntry())
+    if (entry.checks[rowIndex] === colIndex) delete entry.checks[rowIndex]
+    else entry.checks[rowIndex] = colIndex
+    root._commitEvalStudents(cls, root._evalWriteEntry(cls.students, entry))
   }
 
   // Clears this grid's data (checks/appréciation/note) for one student, or
@@ -2457,7 +2598,11 @@ Item {
     root.resetEvaluationStudentConfirmOpen = false
     var cls = root.activeClass()
     if (!cls || !root.evaluationStudentId) return
+    // The partner (if any) keeps its copy of the evaluation, just unpaired.
+    var partnerId = root.evaluationPartnerId()
+    var now = new Date().toISOString()
     var updatedStudents = cls.students.map(function(s) {
+      if (partnerId && s.id === partnerId) return root._studentWithEvalEntry(s, root.evaluationGridId, root._makeEvalEntry(root._evalEntryOf(s, root.evaluationGridId), "", now))
       if (s.id !== root.evaluationStudentId) return s
       var grids = {}
       var existingGrids = s.competencyGrids || {}
@@ -2731,23 +2876,16 @@ Item {
       var appreciation = evaluationAppreciationField.text
       var annotationsPositif = evaluationAnnotationsPositifField.text
       var annotationsNegatif = evaluationAnnotationsNegatifField.text
-      updatedStudents = cls.students.map(function(s) {
-        if (s.id !== root.evaluationStudentId) return s
-        var grids = {}
-        var existingGrids = s.competencyGrids || {}
-        Object.keys(existingGrids).forEach(function(gid) { grids[gid] = existingGrids[gid] })
-        var entry = grids[root.evaluationGridId] || { checks: {}, appreciation: "", note: "", annotationsPositif: "", annotationsNegatif: "" }
-        // note is no longer stored — always the live sum of checks × weights
-        // now, see evaluationComputedNote().
-        grids[root.evaluationGridId] = { checks: entry.checks || {}, appreciation: appreciation, note: "", annotationsPositif: annotationsPositif, annotationsNegatif: annotationsNegatif }
-        return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: s.competencyClearedAt }
-      })
+      // note is no longer stored — always the live sum of checks × weights
+      // now, see evaluationComputedNote().
+      var entry = root._makeEvalEntry(root.evaluationGridEntry())
+      entry.appreciation = appreciation
+      entry.annotationsPositif = annotationsPositif
+      entry.annotationsNegatif = annotationsNegatif
+      updatedStudents = root._evalWriteEntry(cls.students, entry)
     }
 
-    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: intitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
-    root.classes = Store.replaceClass(root.classes, updatedClass)
-    root.persistClasses()
-    if (root.syncDir) root.runSync()
+    root._commitEvalStudents(cls, updatedStudents, intitules)
   }
 
   Timer { id: evalFieldsDebounceTimer; interval: 600; repeat: false; onTriggered: root.persistEvaluationFields() }
@@ -2778,7 +2916,7 @@ Item {
       appreciation: evaluationAppreciationField.text,
       note: root.evaluationComputedNote()
     }
-    return CompetencyGrids.buildTypstSource(Store.studentLabel(student), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
+    return CompetencyGrids.buildTypstSource(root.evaluationStudentsLabel(), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
   }
 
   // Same payload as buildEvaluationTypst(), plain markdown instead of
@@ -2796,7 +2934,7 @@ Item {
       appreciation: evaluationAppreciationField.text,
       note: root.evaluationComputedNote()
     }
-    return CompetencyGrids.buildMarkdownSource(Store.studentLabel(student), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
+    return CompetencyGrids.buildMarkdownSource(root.evaluationStudentsLabel(), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
   }
 
   // Reinstated 2026-10-02, this time fully independent from the Corrections
@@ -2818,7 +2956,7 @@ Item {
     if (!grid || !student) return
     var entry = root.evaluationGridEntry()
     var checks = entry ? entry.checks : {}
-    var prompt = PromptBuilder.buildEvalCompetencesAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, checks, evaluationAnnotationsPositifField.text, evaluationAnnotationsNegatifField.text, root.evaluationAppreciationLength)
+    var prompt = PromptBuilder.buildEvalCompetencesAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, checks, evaluationAnnotationsPositifField.text, evaluationAnnotationsNegatifField.text, root.evaluationAppreciationLength, root.evaluationPartnerId() !== "")
     root.evalGeneratingAppreciation = true
     root.evalGenAppreciationError = ""
     evalGenAppreciationProc.command = ClaudeRunner.buildCommand(prompt)
@@ -2956,7 +3094,8 @@ Item {
     if (!student) return
     root.pathBarMode = "exportEvalPdf"
     var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
-    pathBarField.text = root.homeDir + "/Downloads/eval-" + root.slugify(Store.studentLabel(student)) + "-" + ts + ".pdf"
+    var partner = root.evaluationPartner()
+    pathBarField.text = root.homeDir + "/Downloads/eval-" + root.slugify(Store.studentLabel(student)) + (partner ? "-" + root.slugify(Store.studentLabel(partner)) : "") + "-" + ts + ".pdf"
     Qt.callLater(function() { pathBarField.forceActiveFocus() })
   }
 
@@ -3122,6 +3261,7 @@ Item {
           || root.correctionWritingPopoverOpen
           || root.correctionLogPopoverStudentId !== ""
           || root.resetEvaluationStudentConfirmOpen || root.resetEvaluationClassConfirmOpen
+          || root.evaluationPairPendingId !== ""
         onCloseRequested: root.requestClose()
 
         ScrollView {
@@ -5037,6 +5177,26 @@ Item {
                     onChanged: function(value) { root.selectEvaluationStudent(value) }
                   }
 
+                  // Binôme (Gabriel, 2026-10-06) — see evaluationPartnerOptions().
+                  Dropdown {
+                    visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null
+                    label: "👥 Binôme"
+                    options: root.evaluationPartnerOptions()
+                    value: root.evaluationPartnerId()
+                    foreground: root.foreground
+                    background: root.background
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    // Dropdown assigns `value` itself on pick, breaking the
+                    // binding — restore it so a canceled "Associer ?"
+                    // confirmation doesn't leave a pair displayed that
+                    // doesn't exist.
+                    onChanged: function(picked) {
+                      value = Qt.binding(function() { return root.evaluationPartnerId() })
+                      root.setEvaluationPartner(picked)
+                    }
+                  }
+
                   Dropdown {
                     id: evaluationGridDropdown
                     label: "Type de tableau"
@@ -5074,7 +5234,7 @@ Item {
                     visible: root.activeEvaluationGrid() !== null
                     label: "Barème"
                     width: Style.space(100)
-                    options: [{ value: "20", label: "/ 20" }, { value: "10", label: "/ 10" }]
+                    options: CompetencyGrids.BAREME_TOTALS.slice().reverse().map(function(t) { return { value: String(t), label: "/ " + t } })
                     value: String(root.evaluationBaremeTotal())
                     foreground: root.foreground
                     background: root.background
@@ -6076,6 +6236,19 @@ Item {
         foreground: root.foreground
         onCanceled: root.cancelResetEvaluationClass()
         onConfirmed: root.confirmResetEvaluationClass()
+      }
+
+      ConfirmDialog {
+        anchors.fill: parent
+        opened: root.evaluationPairPendingId !== ""
+        message: "Associer " + (root.evaluationStudent() ? Store.studentLabel(root.evaluationStudent()) : "") + " et " + (root._findStudent(root.activeClass(), root.evaluationPairPendingId) ? Store.studentLabel(root._findStudent(root.activeClass(), root.evaluationPairPendingId)) : "") + " en binôme ? Ce second élève a déjà une évaluation \"" + (root.activeEvaluationGrid() ? root.activeEvaluationGrid().name : "") + "\" : elle sera remplacée par celle de " + (root.evaluationStudent() ? Store.studentLabel(root.evaluationStudent()) : "") + "."
+        cancelText: "Annuler"
+        confirmText: "Associer"
+        selectedIndex: 0
+        background: root.background
+        foreground: root.foreground
+        onCanceled: root.cancelEvaluationPair()
+        onConfirmed: root.confirmEvaluationPair()
       }
     }
   }

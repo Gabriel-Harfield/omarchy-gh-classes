@@ -20,7 +20,7 @@ Item {
   property bool opened: false
   property var grid: null // CompetencyGrids grid object ({ id, name, rows })
   property var weights: ({}) // { "<rowIndex>": points (0-10) }
-  property int total: 20 // évaluation's barème (10 or 20) — Gabriel, 2026-10-01
+  property int total: 20 // évaluation's barème (5, 10, 15 or 20) — Gabriel, 2026-10-01
   property color foreground: Color.foreground
   property color background: Color.background
   property color accent: Color.accent

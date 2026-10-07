@@ -544,6 +544,7 @@ Item {
     if (mode === "exportStats") root.startStatsExport(path)
     else if (mode === "exportEvalPdf") root.startEvalPdfExport(path)
     else if (mode === "exportCompetencyPdf") root.startCompetencyPdfExport(path)
+    else if (mode === "exportEvalGradesCsv") root.startEvalGradesCsvExport(path)
   }
   function cancelPathEntry() { root.pathBarMode = "" }
 
@@ -3215,6 +3216,64 @@ Item {
     }
   }
 
+  // "📊 Exporter la classe (.csv)" (Gabriel, 2026-10-07): one row per
+  // evaluation unit on the CURRENT grid — a binôme collapses to one row,
+  // both names in the same cell, same dedup as the "Élève" dropdown (see
+  // evaluationStudentListOptions()) — so he can hand the whole class's
+  // grades to OnlyOffice without opening every PDF one by one.
+  // Semicolon-delimited, quoted fields, same French-locale convention as
+  // Draw.statsCsv().
+  function buildEvaluationGradesCsv() {
+    var cls = root.activeClass()
+    var grid = root.activeEvaluationGrid()
+    if (!cls || !grid) return ""
+    var gridId = root.evaluationGridId
+    var weights = root.evaluationWeights()
+    var intitule = evaluationIntituleField.text.trim()
+    var sorted = cls.students.slice().sort(function(a, b) { return a.nom.localeCompare(b.nom) })
+    var seen = {}
+    var lines = ["Devoir;Classe;Élève(s);Note"]
+    sorted.forEach(function(s) {
+      if (seen[s.id]) return
+      var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
+      var partner = partnerId ? root._findStudent(cls, partnerId) : null
+      seen[s.id] = true
+      if (partnerId) seen[partnerId] = true
+      var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
+      var entry = root._evalEntryOf(s, gridId)
+      var note = CompetencyGrids.computeWeightedNote(grid, entry ? entry.checks : {}, weights).severe
+      lines.push([Draw.csvField(intitule), Draw.csvField(cls.name), Draw.csvField(label), Draw.csvField(note)].join(";"))
+    })
+    return lines.join("\n") + "\n"
+  }
+
+  property string evalGradesCsvExportedPath: ""
+
+  function exportEvaluationGradesCsv() {
+    var cls = root.activeClass()
+    var grid = root.activeEvaluationGrid()
+    if (!cls || !grid) return
+    root.pathBarMode = "exportEvalGradesCsv"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/notes-" + root.slugify(cls.name) + "-" + root.slugify(grid.name) + "-" + ts + ".csv"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  function startEvalGradesCsvExport(destPath) {
+    root.evalGradesCsvExportedPath = ""
+    evalGradesCsvExportFile.path = destPath
+    var csv = root.buildEvaluationGradesCsv()
+    Qt.callLater(function() { evalGradesCsvExportFile.setText(csv) })
+  }
+
+  FileView {
+    id: evalGradesCsvExportFile
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root.evalGradesCsvExportedPath = evalGradesCsvExportFile.path
+  }
+
   // ---- feature 5: assistant de correction ------------------------------------
   //
   // Gabriel, 2026-10-02: a support tool, deliberately NOT an auto-correction
@@ -3522,6 +3581,7 @@ Item {
                 Text {
                   text: root.pathBarMode === "exportEvalPdf" ? "Exporter la grille (.pdf) vers :"
                     : root.pathBarMode === "exportCompetencyPdf" ? "Exporter la fiche (.pdf) vers :"
+                    : root.pathBarMode === "exportEvalGradesCsv" ? "Exporter les notes de la classe (.csv) vers :"
                     : "Exporter les statistiques (.csv) vers :"
                   color: Qt.darker(root.foreground, 1.4)
                   font.family: root.fontFamily
@@ -5321,6 +5381,32 @@ Item {
                       onClicked: root.openEvaluationWeightsPopover()
                     }
                   }
+
+                  Item {
+                    width: evalGradesCsvButton.implicitWidth
+                    height: evaluationGridDropdown.implicitHeight
+                    visible: root.activeEvaluationGrid() !== null
+                    Button {
+                      id: evalGradesCsvButton
+                      anchors.bottom: parent.bottom
+                      text: "📊 Exporter les notes de la classe (.csv)"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.exportEvaluationGradesCsv()
+                    }
+                  }
+                }
+
+                Text {
+                  visible: root.evalGradesCsvExportedPath !== ""
+                  width: parent.width
+                  text: "Notes exportées : " + root.evalGradesCsvExportedPath
+                  color: root.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WrapAnywhere
+                  textFormat: Text.PlainText
                 }
 
                 Text {

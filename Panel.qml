@@ -2433,6 +2433,50 @@ Item {
     return out
   }
 
+  // "Élève" dropdown (Gabriel, 2026-10-07): a binôme is ONE evaluation, so
+  // listing both partners separately just makes him hunt down each half of
+  // every pair by hand (e.g. to re-export after a barème change). Collapse
+  // each pair into a single "A / B" row instead — same √ done-ness either
+  // way since they share the same checks (see evaluationStudentDone) — and
+  // keep only solo students on their own. Mirrors the "Binôme" dropdown's
+  // own existing convention of dropping an already-paired classmate from
+  // its list.
+  function evaluationStudentListOptions() {
+    var cls = root.activeClass()
+    var out = [{ value: "", label: "— Sélectionner un élève —" }]
+    if (!cls) return out
+    var gridId = root.evaluationGridId
+    var seen = {}
+    cls.students.forEach(function(s) {
+      if (seen[s.id]) return
+      var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
+      var partner = partnerId ? root._findStudent(cls, partnerId) : null
+      var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
+      out.push({ value: s.id, label: (root.evaluationStudentDone(s) ? "✅ " : "") + label })
+      seen[s.id] = true
+      if (partnerId) seen[partnerId] = true
+    })
+    return out
+  }
+
+  // The dropdown's own `value` must match one of evaluationStudentListOptions()'s
+  // entries or its trigger falls back to showing the raw id — if the
+  // selected student is a pair's "second half" collapsed away above,
+  // display the representative (whichever of the two appears first in the
+  // roster) instead. root.evaluationStudentId itself is left untouched:
+  // every read/write already goes through the shared, mirrored entry, so
+  // which of the two ids is "self" internally doesn't matter.
+  function evaluationStudentDisplayId(id) {
+    var cls = root.activeClass()
+    if (!cls || !id) return id
+    var partnerId = root._evalPartnerIdOf(cls, id, root.evaluationGridId)
+    if (!partnerId) return id
+    for (var i = 0; i < cls.students.length; i++) {
+      if (cls.students[i].id === id || cls.students[i].id === partnerId) return cls.students[i].id
+    }
+    return id
+  }
+
   property string evaluationPairPendingId: "" // partner awaiting "écraser ?" confirmation
 
   function setEvaluationPartner(id) {
@@ -5183,12 +5227,8 @@ Item {
                   Dropdown {
                     id: evaluationStudentDropdown
                     label: "Élève"
-                    options: [{ value: "", label: "— Sélectionner un élève —" }].concat(
-                      root.activeClass()
-                        ? root.activeClass().students.map(function(s) { return { value: s.id, label: (root.evaluationStudentDone(s) ? "✅ " : "") + Store.studentLabel(s) } })
-                        : []
-                    )
-                    value: root.evaluationStudentId
+                    options: root.evaluationStudentListOptions()
+                    value: root.evaluationStudentDisplayId(root.evaluationStudentId)
                     foreground: root.foreground
                     background: root.background
                     accent: root.accent

@@ -21,6 +21,7 @@ import "lib/Spellcheck.js" as Spellcheck
 import "lib/CompetencyPromptBuilder.js" as CompetencyPromptBuilder
 import "lib/CorrectionAssistantPromptBuilder.js" as CorrectionAssistantPromptBuilder
 import "lib/EvalTemplatesStore.js" as EvalTemplatesStore
+import "lib/CommentsBankStore.js" as CommentsBankStore
 import "ui"
 
 // GH Classes: one tab per class, weighted-random draw, group generation
@@ -83,6 +84,12 @@ Item {
   // synced the same way as classes.json rather than left inside
   // corrections.json.
   readonly property string evalTemplatesPath: root.stateDir + "/eval_templates.json"
+  // "Commentaires" section's reusable phrase bank (Gabriel, 2026-10-08) —
+  // see lib/CommentsBankStore.js's header comment. Own file + own
+  // tombstones file, same split classes.json/eval_templates.json already
+  // use, chained into the same runSync().
+  readonly property string evalCommentsBankPath: root.stateDir + "/eval_comments_bank.json"
+  readonly property string evalCommentsTombstonesPath: root.stateDir + "/eval_comments_tombstones.json"
 
   function expandHome(path) {
     var p = String(path || "").trim()
@@ -150,6 +157,65 @@ Item {
 
   function persistEvalTemplates() {
     evalTemplatesFile.setText(EvalTemplatesStore.serializeTemplates(root.evalTemplates))
+  }
+
+  // ---- persisted: "Commentaires" reusable phrase bank --------------------
+  //
+  // Same shape/idiom as GH Grilles' own criteria bank: { id, text, tag }
+  // entries, tombstone-based deletion so a local delete doesn't get
+  // silently re-imported by the next sync (see CommentsBankStore.js).
+
+  property var evalCommentsBank: []
+
+  FileView {
+    id: evalCommentsBankFile
+    path: root.evalCommentsBankPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.evalCommentsBank = CommentsBankStore.parseBank(evalCommentsBankFile.text())
+    onLoadFailed: root.evalCommentsBank = []
+  }
+
+  function persistEvalCommentsBank() {
+    evalCommentsBankFile.setText(CommentsBankStore.serializeBank(root.evalCommentsBank))
+  }
+
+  property var evalCommentsBankDeletedKeys: []
+
+  FileView {
+    id: evalCommentsTombstonesFile
+    path: root.evalCommentsTombstonesPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.evalCommentsBankDeletedKeys = CommentsBankStore.parseTombstones(evalCommentsTombstonesFile.text())
+    onLoadFailed: root.evalCommentsBankDeletedKeys = []
+  }
+
+  function persistEvalCommentsTombstones() {
+    evalCommentsTombstonesFile.setText(CommentsBankStore.serializeTombstones(root.evalCommentsBankDeletedKeys))
+  }
+
+  function upsertEvalCommentToBank(text, tag) {
+    root.evalCommentsBank = CommentsBankStore.upsertEntry(root.evalCommentsBank, text, tag)
+    root.persistEvalCommentsBank()
+    if (root.syncDir) root.runSync()
+  }
+
+  function deleteEvalCommentsBankEntry(id) {
+    var target = null
+    for (var i = 0; i < root.evalCommentsBank.length; i++) {
+      if (root.evalCommentsBank[i].id === id) { target = root.evalCommentsBank[i]; break }
+    }
+    root.evalCommentsBank = CommentsBankStore.removeEntry(root.evalCommentsBank, id)
+    root.persistEvalCommentsBank()
+    if (target) {
+      root.evalCommentsBankDeletedKeys = CommentsBankStore.sanitizeTombstones(
+        root.evalCommentsBankDeletedKeys.concat([CommentsBankStore.entryKey(target.text, target.tag)]))
+      root.persistEvalCommentsTombstones()
+    }
+    if (root.syncDir) root.runSync()
   }
 
   // ---- persisted: settings (last active class tab + sync folder) ----------
@@ -335,6 +401,43 @@ Item {
 
   FileView {
     id: syncTemplatesWriteFile
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    // eval_templates.json done → chain into eval_comments_bank.json rather
+    // than clearing syncInFlight here, same convention as classes.json
+    // chaining into this file above.
+    onSaved: root.runCommentsBankSync()
+  }
+
+  // ---- eval_comments_bank.json sync — additive merge with tombstones (see
+  // CommentsBankStore.mergeBanks()'s own header comment) — chained after
+  // eval_templates.json sync above, same ensured directory, same
+  // syncInFlight flag. Last step in the chain: clears syncInFlight itself.
+
+  function runCommentsBankSync() {
+    var cmd = Files.readCommand(root._syncPendingDir, "eval_comments_bank.json", 4194304, 5)
+    if (!cmd) { syncInFlightTimeout.stop(); root.syncInFlight = false; return }
+    syncCommentsBankReadProc.command = cmd
+    syncCommentsBankReadProc.running = false
+    syncCommentsBankReadProc.running = true
+  }
+
+  Process {
+    id: syncCommentsBankReadProc
+    stdout: StdioCollector { id: syncCommentsBankReadOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var remoteBank = CommentsBankStore.parseBank(syncCommentsBankReadOut.text || "[]")
+      var merged = CommentsBankStore.mergeBanks(root.evalCommentsBank, remoteBank, root.evalCommentsBankDeletedKeys)
+      root.evalCommentsBank = merged
+      root.persistEvalCommentsBank()
+      syncCommentsBankWriteFile.path = root._syncPendingDir + "/eval_comments_bank.json"
+      Qt.callLater(function() { syncCommentsBankWriteFile.setText(CommentsBankStore.serializeBank(merged)) })
+    }
+  }
+
+  FileView {
+    id: syncCommentsBankWriteFile
     watchChanges: false
     atomicWrites: true
     printErrors: false
@@ -2379,14 +2482,15 @@ Item {
 
   function _evalEntryHasData(entry) {
     if (!entry) return false
-    return Object.keys(entry.checks || {}).length > 0 || !!entry.appreciation || !!entry.annotationsPositif || !!entry.annotationsNegatif
+    return Object.keys(entry.checks || {}).length > 0 || !!entry.appreciation || !!entry.annotationsPositif || !!entry.annotationsNegatif || (entry.comments || []).length > 0
   }
 
   function _makeEvalEntry(base, binome, binomeAt) {
     var b = base || {}
     var checks = {}
     Object.keys(b.checks || {}).forEach(function(k) { checks[k] = b.checks[k] })
-    return { checks: checks, appreciation: b.appreciation || "", note: "", annotationsPositif: b.annotationsPositif || "", annotationsNegatif: b.annotationsNegatif || "", binome: binome || "", binomeAt: binomeAt || "" }
+    var comments = (b.comments || []).map(function(c) { return { id: c.id, text: c.text, tag: c.tag || "" } })
+    return { checks: checks, appreciation: b.appreciation || "", note: "", annotationsPositif: b.annotationsPositif || "", annotationsNegatif: b.annotationsNegatif || "", binome: binome || "", binomeAt: binomeAt || "", comments: comments }
   }
 
   function _studentWithEvalEntry(s, gridId, entry) {
@@ -2957,6 +3061,85 @@ Item {
 
   Timer { id: evalFieldsDebounceTimer; interval: 600; repeat: false; onTriggered: root.persistEvaluationFields() }
 
+  // ---- "Commentaires" (Gabriel, 2026-10-08) -------------------------------
+  //
+  // Added ALONGSIDE the free-text Appréciation above, not replacing it —
+  // a transition period: if the reusable-phrase-bank idea proves itself,
+  // Appréciation goes away later, but for now both coexist so an
+  // in-progress correction using only Appréciation is untouched. Exported
+  // merged into that same "Appréciation" section with no visible
+  // distinction — see CompetencyGrids.buildTypstBody().
+  //
+  // Each bullet is { id, text, tag }, stored directly on the student's grid
+  // entry (mirrored to a binôme partner the same way checks/appreciation
+  // already are, via _evalWriteEntry) — committed immediately on
+  // Ajouter/Enregistrer/Insérer, no debounce, same posture as a checkbox
+  // click elsewhere in this tab, unlike the free-text fields above.
+
+  function evaluationComments() {
+    var entry = root.evaluationGridEntry()
+    return (entry && entry.comments) || []
+  }
+
+  function _addEvalCommentText(text, tag) {
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationStudentId) return
+    var entry = root._makeEvalEntry(root.evaluationGridEntry())
+    entry.comments = entry.comments.concat([{ id: CommentsBankStore.makeId(), text: text, tag: tag || "" }])
+    root._commitEvalStudents(cls, root._evalWriteEntry(cls.students, entry))
+  }
+
+  // "➕ Ajouter" — commits the draft as a new bullet for THIS student only,
+  // no tag, no bank interaction. The common case: a remark worth keeping
+  // for this copy, not necessarily worth remembering for next time.
+  function addEvalComment() {
+    var text = evaluationCommentDraftField.text.trim()
+    if (!text) return
+    root._addEvalCommentText(text, "")
+    evaluationCommentDraftField.text = ""
+  }
+
+  function removeEvalComment(id) {
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationStudentId) return
+    var entry = root._makeEvalEntry(root.evaluationGridEntry())
+    entry.comments = entry.comments.filter(function(c) { return c.id !== id })
+    root._commitEvalStudents(cls, root._evalWriteEntry(cls.students, entry))
+  }
+
+  // "💾 Enregistrer dans la banque" — same draft text, but ALSO remembered
+  // for reuse on later copies: opens the tag popover, then both banks it
+  // (CommentsBankStore, global, own sync) and adds it as a bullet for this
+  // student in one action — Gabriel is already using it right now, not
+  // just filing it away for later.
+  property bool evalCommentTagPopoverOpen: false
+
+  function openEvalCommentTagPopover() {
+    if (!evaluationCommentDraftField.text.trim()) return
+    root.evalCommentTagPopoverOpen = true
+  }
+  function cancelEvalCommentTagPopover() { root.evalCommentTagPopoverOpen = false }
+  function confirmEvalCommentTag(tag) {
+    root.evalCommentTagPopoverOpen = false
+    var text = evaluationCommentDraftField.text.trim()
+    if (!text) return
+    root.upsertEvalCommentToBank(text, tag)
+    root._addEvalCommentText(text, tag)
+    evaluationCommentDraftField.text = ""
+  }
+
+  // "📚 Insérer depuis la banque" — browse/filter by tag or text, click an
+  // entry to add it as a new bullet for THIS student (reusing its existing
+  // tag, no re-tagging needed).
+  property bool evalCommentBankPopoverOpen: false
+
+  function openEvalCommentBankPopover() { root.evalCommentBankPopoverOpen = true }
+  function cancelEvalCommentBankPopover() { root.evalCommentBankPopoverOpen = false }
+  function insertEvalCommentFromBank(entry) {
+    root._addEvalCommentText(entry.text, entry.tag)
+    root.evalCommentBankPopoverOpen = false
+  }
+
   function selectEvaluationStudent(id) {
     root.flushEvaluationFieldsIfPending()
     root.evaluationStudentId = id
@@ -2981,6 +3164,7 @@ Item {
     var payload = {
       checks: entry.checks || {},
       appreciation: evaluationAppreciationField.text,
+      comments: entry.comments || [],
       note: root.evaluationComputedNote()
     }
     return CompetencyGrids.buildTypstSource(root.evaluationStudentsLabel(), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
@@ -2999,6 +3183,7 @@ Item {
     var payload = {
       checks: entry.checks || {},
       appreciation: evaluationAppreciationField.text,
+      comments: entry.comments || [],
       note: root.evaluationComputedNote()
     }
     return CompetencyGrids.buildMarkdownSource(root.evaluationStudentsLabel(), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
@@ -3262,7 +3447,7 @@ Item {
       var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
       var entry = root._evalEntryOf(s, gridId)
       var note = CompetencyGrids.computeWeightedNote(grid, entry ? entry.checks : {}, weights).severe
-      entries.push({ studentLabel: label, payload: { checks: entry ? entry.checks : {}, appreciation: entry ? entry.appreciation : "", note: note } })
+      entries.push({ studentLabel: label, payload: { checks: entry ? entry.checks : {}, appreciation: entry ? entry.appreciation : "", comments: entry ? (entry.comments || []) : [], note: note } })
     })
     if (!entries.length) return ""
     return CompetencyGrids.buildClassEvaluationTypst(cls.name, grid, intitule, baremeTotal, entries)
@@ -3429,6 +3614,7 @@ Item {
           || methodeCritereField.activeFocus || contenuCritereField.activeFocus || langueCritereField.activeFocus
           || correctionComplementsField.activeFocus
           || evaluationIntituleField.activeFocus || evaluationAppreciationField.activeFocus
+          || evaluationCommentDraftField.activeFocus
           || root.classSettingsOpen || root.incompatOpen || root.pathBarMode !== ""
           || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen || root.syncSettingsOpen
           || root.correctionReplaceConfirmOpen
@@ -3437,6 +3623,7 @@ Item {
           || root.correctionLogPopoverStudentId !== ""
           || root.resetEvaluationStudentConfirmOpen || root.resetEvaluationClassConfirmOpen
           || root.evaluationPairPendingId !== ""
+          || root.evalCommentTagPopoverOpen || root.evalCommentBankPopoverOpen
         onCloseRequested: root.requestClose()
 
         ScrollView {
@@ -5754,6 +5941,104 @@ Item {
 
                 Column {
                   visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null
+                  width: parent.width
+                  spacing: Style.spacing.xxs
+
+                  Text {
+                    text: "Commentaires"
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: "Bullet-points réutilisables d'une copie à l'autre — fusionnés avec l'Appréciation ci-dessus à l'export, sans distinction visible."
+                    color: Qt.darker(root.foreground, 1.5)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+
+                  Repeater {
+                    model: root.evaluationComments()
+                    delegate: Row {
+                      id: commentRow
+                      required property var modelData
+                      width: parent ? parent.width : 0
+                      spacing: Style.spacing.sm
+
+                      Text {
+                        width: parent.width - removeGlyph.width - Style.spacing.sm
+                        text: "• " + commentRow.modelData.text
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                      }
+
+                      Text {
+                        id: removeGlyph
+                        text: "×"
+                        color: Qt.darker(root.foreground, 1.3)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.title
+                        font.bold: true
+
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        MouseArea {
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(6)
+                          onClicked: root.removeEvalComment(commentRow.modelData.id)
+                        }
+                      }
+                    }
+                  }
+
+                  TextField {
+                    id: evaluationCommentDraftField
+                    width: parent.width
+                    placeholderText: "Nouveau commentaire…"
+                    foreground: root.foreground
+                    accent: root.accent
+                    Keys.onReturnPressed: root.addEvalComment()
+                    Keys.onEnterPressed: root.addEvalComment()
+                  }
+
+                  Row {
+                    spacing: Style.spacing.controlGap
+
+                    Button {
+                      text: "➕ Ajouter"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      tooltipText: "Ajoute ce texte comme commentaire pour cet élève uniquement"
+                      onClicked: root.addEvalComment()
+                    }
+                    Button {
+                      text: "💾 Enregistrer dans la banque"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      tooltipText: "Ajoute ce texte pour cet élève ET l'enregistre, avec un tag, pour le réutiliser plus tard"
+                      onClicked: root.openEvalCommentTagPopover()
+                    }
+                    Button {
+                      text: "📚 Insérer depuis la banque"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      tooltipText: "Parcourir/filtrer les commentaires déjà enregistrés"
+                      onClicked: root.openEvalCommentBankPopover()
+                    }
+                  }
+                }
+
+                Column {
+                  visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null
                   spacing: Style.spacing.xxs
 
                   Row {
@@ -6245,6 +6530,31 @@ Item {
         onCanceled: root.closeEvaluationWeightsPopover()
         onWeightChanged: function(rowIndex, points) { root.setEvaluationWeight(rowIndex, points) }
         onResetRequested: root.resetEvaluationWeights()
+      }
+
+      CommentTagPopover {
+        anchors.fill: parent
+        opened: root.evalCommentTagPopoverOpen
+        existingTags: CommentsBankStore.distinctTags(root.evalCommentsBank)
+        foreground: root.foreground
+        background: root.background
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onCanceled: root.cancelEvalCommentTagPopover()
+        onTagPicked: function(tag) { root.confirmEvalCommentTag(tag) }
+      }
+
+      CommentBankPopover {
+        anchors.fill: parent
+        opened: root.evalCommentBankPopoverOpen
+        bank: root.evalCommentsBank
+        foreground: root.foreground
+        background: root.background
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onCanceled: root.cancelEvalCommentBankPopover()
+        onCommentPicked: function(entry) { root.insertEvalCommentFromBank(entry) }
+        onDeleteConfirmed: function(id) { root.deleteEvalCommentsBankEntry(id) }
       }
 
       ConfirmDialog {

@@ -545,6 +545,7 @@ Item {
     else if (mode === "exportEvalPdf") root.startEvalPdfExport(path)
     else if (mode === "exportCompetencyPdf") root.startCompetencyPdfExport(path)
     else if (mode === "exportEvalGradesCsv") root.startEvalGradesCsvExport(path)
+    else if (mode === "exportClassEvalPdf") root.startClassEvalPdfExport(path)
   }
   function cancelPathEntry() { root.pathBarMode = "" }
 
@@ -3274,6 +3275,99 @@ Item {
     onSaved: root.evalGradesCsvExportedPath = evalGradesCsvExportFile.path
   }
 
+  // "📑 Exporter toutes les fiches corrigées (.pdf)" (Gabriel, 2026-10-08):
+  // one combined PDF, one grid per page, for every "corrigé" student/binôme
+  // on the CURRENT grid — same done-ness test (evaluationStudentDone()) and
+  // same binôme dedup (evaluationStudentListOptions()) as the "Élève"
+  // dropdown, so a student with no check anywhere (absent) is simply left
+  // out rather than printed with a blank grid.
+  function buildClassEvaluationGradesTypst() {
+    var cls = root.activeClass()
+    var grid = root.activeEvaluationGrid()
+    if (!cls || !grid) return ""
+    var gridId = root.evaluationGridId
+    var weights = root.evaluationWeights()
+    var baremeTotal = root.evaluationBaremeTotal()
+    var intitule = evaluationIntituleField.text.trim()
+    var sorted = cls.students.slice().sort(function(a, b) { return a.nom.localeCompare(b.nom) })
+    var seen = {}
+    var entries = []
+    sorted.forEach(function(s) {
+      if (seen[s.id]) return
+      var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
+      var partner = partnerId ? root._findStudent(cls, partnerId) : null
+      seen[s.id] = true
+      if (partnerId) seen[partnerId] = true
+      if (!root.evaluationStudentDone(s)) return
+      var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
+      var entry = root._evalEntryOf(s, gridId)
+      var note = CompetencyGrids.computeWeightedNote(grid, entry ? entry.checks : {}, weights).severe
+      entries.push({ studentLabel: label, payload: { checks: entry ? entry.checks : {}, appreciation: entry ? entry.appreciation : "", note: note } })
+    })
+    if (!entries.length) return ""
+    return CompetencyGrids.buildClassEvaluationTypst(cls.name, grid, intitule, baremeTotal, entries)
+  }
+
+  property string classEvalPdfExportError: ""
+  property string classEvalPdfExportedPath: ""
+  property string _pendingClassEvalPdfPath: ""
+  property string _classEvalExportLastSrc: ""
+  readonly property string classEvalExportSrcPath: root.stateDir + "/.ghclasses-class-eval-export.typ"
+
+  function exportClassEvaluationPdf() {
+    var cls = root.activeClass()
+    var grid = root.activeEvaluationGrid()
+    if (!cls || !grid) return
+    root.pathBarMode = "exportClassEvalPdf"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/fiches-" + root.slugify(cls.name) + "-" + root.slugify(grid.name) + "-" + ts + ".pdf"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  // Same no-op-write guard as evalExportSrcFile above (see its own comment)
+  // — a fixed scratch path, so re-exporting with byte-identical content
+  // would otherwise never fire FileView's onSaved.
+  function startClassEvalPdfExport(destPath) {
+    var src = root.buildClassEvaluationGradesTypst()
+    if (!src) return
+    root.classEvalPdfExportError = ""
+    root.classEvalPdfExportedPath = ""
+    root._pendingClassEvalPdfPath = destPath
+    if (src === root._classEvalExportLastSrc) {
+      root._startClassEvalPdfCompile()
+    } else {
+      root._classEvalExportLastSrc = src
+      classEvalExportSrcFile.setText(src)
+    }
+  }
+
+  function _startClassEvalPdfCompile() {
+    classEvalPdfCompileProc.command = ["typst", "compile", root.classEvalExportSrcPath, root._pendingClassEvalPdfPath]
+    classEvalPdfCompileProc.running = false
+    classEvalPdfCompileProc.running = true
+  }
+
+  FileView {
+    id: classEvalExportSrcFile
+    path: root.classEvalExportSrcPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root._startClassEvalPdfCompile()
+  }
+
+  Process {
+    id: classEvalPdfCompileProc
+    stderr: StdioCollector { id: classEvalPdfCompileErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.classEvalPdfExportError = (classEvalPdfCompileErr.text || "Échec de l'export PDF.").slice(0, 500)
+        return
+      }
+      root.classEvalPdfExportedPath = root._pendingClassEvalPdfPath
+    }
+  }
+
   // ---- feature 5: assistant de correction ------------------------------------
   //
   // Gabriel, 2026-10-02: a support tool, deliberately NOT an auto-correction
@@ -3582,6 +3676,7 @@ Item {
                   text: root.pathBarMode === "exportEvalPdf" ? "Exporter la grille (.pdf) vers :"
                     : root.pathBarMode === "exportCompetencyPdf" ? "Exporter la fiche (.pdf) vers :"
                     : root.pathBarMode === "exportEvalGradesCsv" ? "Exporter les notes de la classe (.csv) vers :"
+                    : root.pathBarMode === "exportClassEvalPdf" ? "Exporter les fiches corrigées (.pdf) vers :"
                     : "Exporter les statistiques (.csv) vers :"
                   color: Qt.darker(root.foreground, 1.4)
                   font.family: root.fontFamily
@@ -5396,6 +5491,21 @@ Item {
                       onClicked: root.exportEvaluationGradesCsv()
                     }
                   }
+
+                  Item {
+                    width: classEvalPdfButton.implicitWidth
+                    height: evaluationGridDropdown.implicitHeight
+                    visible: root.activeEvaluationGrid() !== null
+                    Button {
+                      id: classEvalPdfButton
+                      anchors.bottom: parent.bottom
+                      text: "📑 Exporter toutes les fiches corrigées (.pdf)"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.exportClassEvaluationPdf()
+                    }
+                  }
                 }
 
                 Text {
@@ -5406,6 +5516,28 @@ Item {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                   wrapMode: Text.WrapAnywhere
+                  textFormat: Text.PlainText
+                }
+
+                Text {
+                  visible: root.classEvalPdfExportedPath !== ""
+                  width: parent.width
+                  text: "Fiches exportées : " + root.classEvalPdfExportedPath
+                  color: root.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WrapAnywhere
+                  textFormat: Text.PlainText
+                }
+
+                Text {
+                  visible: root.classEvalPdfExportError !== ""
+                  width: parent.width
+                  text: root.classEvalPdfExportError
+                  color: Color.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
                   textFormat: Text.PlainText
                 }
 

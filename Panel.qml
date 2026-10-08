@@ -2908,8 +2908,6 @@ Item {
     root.evalSuggestWord = ""
     root.evalSuggestions = []
     evaluationAppreciationField.text = entry ? entry.appreciation : ""
-    evaluationAnnotationsPositifField.text = entry ? (entry.annotationsPositif || "") : ""
-    evaluationAnnotationsNegatifField.text = entry ? (entry.annotationsNegatif || "") : ""
     root.evalCheckResult = ""
     root.evalCheckError = ""
     root._evalFieldsLoading = false
@@ -2943,14 +2941,14 @@ Item {
     var updatedStudents = cls.students
     if (root.evaluationStudentId) {
       var appreciation = evaluationAppreciationField.text
-      var annotationsPositif = evaluationAnnotationsPositifField.text
-      var annotationsNegatif = evaluationAnnotationsNegatifField.text
       // note is no longer stored — always the live sum of checks × weights
-      // now, see evaluationComputedNote().
+      // now, see evaluationComputedNote(). annotationsPositif/Negatif are
+      // no longer editable (their fields + the generator they fed were
+      // removed 2026-10-08) but _makeEvalEntry() still carries forward
+      // whatever a student's entry already has, so old annotation text
+      // from before the removal isn't silently dropped on the next save.
       var entry = root._makeEvalEntry(root.evaluationGridEntry())
       entry.appreciation = appreciation
-      entry.annotationsPositif = annotationsPositif
-      entry.annotationsNegatif = annotationsNegatif
       updatedStudents = root._evalWriteEntry(cls.students, entry)
     }
 
@@ -3004,44 +3002,6 @@ Item {
       note: root.evaluationComputedNote()
     }
     return CompetencyGrids.buildMarkdownSource(root.evaluationStudentsLabel(), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
-  }
-
-  // Reinstated 2026-10-02, this time fully independent from the Corrections
-  // tab's own generator ("vraiment à part, débranché", Gabriel's own words)
-  // — see PromptBuilder.buildEvalCompetencesAppreciationPrompt(). Grounded
-  // only in checked paliers (with their real written text) + the two
-  // annotation columns below; overwrites whatever was already typed, same
-  // low-friction convention as "Régénérer l'appréciation" elsewhere.
-  property bool evalGeneratingAppreciation: false
-  property string evalGenAppreciationError: ""
-
-  function requestGenerateEvalAppreciation() {
-    var grid = root.activeEvaluationGrid()
-    var student = root.evaluationStudent()
-    if (!grid || !student) return
-    var entry = root.evaluationGridEntry()
-    var checks = entry ? entry.checks : {}
-    var prompt = PromptBuilder.buildEvalCompetencesAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, checks, evaluationAnnotationsPositifField.text, evaluationAnnotationsNegatifField.text, root.evaluationPartnerId() !== "")
-    root.evalGeneratingAppreciation = true
-    root.evalGenAppreciationError = ""
-    evalGenAppreciationProc.command = ClaudeRunner.buildCommand(prompt)
-    evalGenAppreciationProc.running = false
-    evalGenAppreciationProc.running = true
-  }
-
-  Process {
-    id: evalGenAppreciationProc
-    stdout: StdioCollector { id: evalGenAppreciationOut; waitForEnd: true }
-    stderr: StdioCollector { id: evalGenAppreciationErr; waitForEnd: true }
-    onExited: function(exitCode) {
-      root.evalGeneratingAppreciation = false
-      if (exitCode !== 0) {
-        root.evalGenAppreciationError = (evalGenAppreciationErr.text || "Échec de la génération.").slice(0, 500)
-        return
-      }
-      var result = (evalGenAppreciationOut.text || "").trim()
-      if (result) evaluationAppreciationField.text = result
-    }
   }
 
   // "✓ Vérifier l'orthographe et la syntaxe" — a check ONLY of what Gabriel
@@ -3469,7 +3429,6 @@ Item {
           || methodeCritereField.activeFocus || contenuCritereField.activeFocus || langueCritereField.activeFocus
           || correctionComplementsField.activeFocus
           || evaluationIntituleField.activeFocus || evaluationAppreciationField.activeFocus
-          || evaluationAnnotationsPositifField.activeFocus || evaluationAnnotationsNegatifField.activeFocus
           || root.classSettingsOpen || root.incompatOpen || root.pathBarMode !== ""
           || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen || root.syncSettingsOpen
           || root.correctionReplaceConfirmOpen
@@ -5671,116 +5630,6 @@ Item {
                   spacing: Style.spacing.xxs
 
                   Text {
-                    text: "Annotations"
-                    color: Qt.darker(root.foreground, 1.4)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
-                  }
-
-                  Text {
-                    width: parent.width
-                    text: "Notes libres prises en lisant la copie — base, avec la grille, de \"🧠 Générer une appréciation\" ci-dessous. Deux colonnes séparées (Gabriel, 2026-10-02) pour plus de précision."
-                    color: Qt.darker(root.foreground, 1.5)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    wrapMode: Text.WordWrap
-                  }
-
-                  Row {
-                    width: parent.width
-                    spacing: Style.spacing.md
-
-                    Column {
-                      width: (parent.width - Style.spacing.md) / 2
-                      spacing: Style.spacing.xxs
-
-                      Text {
-                        text: "Points positifs"
-                        color: Qt.darker(root.foreground, 1.4)
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.caption
-                        font.bold: true
-                      }
-
-                      Rectangle {
-                        width: parent.width
-                        height: Style.space(100)
-                        radius: Style.cornerRadius
-                        color: Style.normalFillFor(root.foreground, root.accent)
-                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-                        border.width: 1
-                        clip: true
-
-                        ScrollView {
-                          anchors.fill: parent
-                          anchors.margins: Style.space(6)
-                          clip: true
-                          ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-                          TextArea {
-                            id: evaluationAnnotationsPositifField
-                            wrapMode: TextArea.Wrap
-                            color: root.foreground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.body
-                            background: null
-                            placeholderText: "Ce qui fonctionne…"
-                            onTextChanged: root.queueEvaluationFieldsPersist()
-                          }
-                        }
-                      }
-                    }
-
-                    Column {
-                      width: (parent.width - Style.spacing.md) / 2
-                      spacing: Style.spacing.xxs
-
-                      Text {
-                        text: "Points négatifs"
-                        color: Qt.darker(root.foreground, 1.4)
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.caption
-                        font.bold: true
-                      }
-
-                      Rectangle {
-                        width: parent.width
-                        height: Style.space(100)
-                        radius: Style.cornerRadius
-                        color: Style.normalFillFor(root.foreground, root.accent)
-                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-                        border.width: 1
-                        clip: true
-
-                        ScrollView {
-                          anchors.fill: parent
-                          anchors.margins: Style.space(6)
-                          clip: true
-                          ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-
-                          TextArea {
-                            id: evaluationAnnotationsNegatifField
-                            wrapMode: TextArea.Wrap
-                            color: root.foreground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.body
-                            background: null
-                            placeholderText: "Ce qui doit progresser…"
-                            onTextChanged: root.queueEvaluationFieldsPersist()
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-
-                Column {
-                  visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null
-                  width: parent.width
-                  spacing: Style.spacing.xxs
-
-                  Text {
                     text: "Appréciation"
                     color: Qt.darker(root.foreground, 1.4)
                     font.family: root.fontFamily
@@ -5925,17 +5774,6 @@ Item {
 
                     Button {
                       anchors.verticalCenter: parent.verticalCenter
-                      text: root.evalGeneratingAppreciation ? "Génération…" : "🧠 Générer une appréciation"
-                      bordered: true
-                      enabled: !root.evalGeneratingAppreciation
-                      foreground: root.foreground
-                      accent: root.accent
-                      tooltipText: "Remplace le texte actuel de l'Appréciation ci-dessus, à partir de la grille et des annotations"
-                      onClicked: root.requestGenerateEvalAppreciation()
-                    }
-
-                    Button {
-                      anchors.verticalCenter: parent.verticalCenter
                       text: root.evalCheckingAppreciation ? "Vérification…" : "✓ Vérifier l'orthographe et la syntaxe"
                       bordered: true
                       enabled: !root.evalCheckingAppreciation
@@ -5944,17 +5782,6 @@ Item {
                       tooltipText: "Relit le texte actuel de l'Appréciation ci-dessus, sans le modifier"
                       onClicked: root.requestCheckAppreciation()
                     }
-                  }
-
-                  Text {
-                    visible: root.evalGenAppreciationError !== ""
-                    width: Style.space(320)
-                    text: root.evalGenAppreciationError
-                    color: Color.urgent
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
                   }
 
                   Text {

@@ -22,6 +22,8 @@ import "lib/CompetencyPromptBuilder.js" as CompetencyPromptBuilder
 import "lib/CorrectionAssistantPromptBuilder.js" as CorrectionAssistantPromptBuilder
 import "lib/EvalTemplatesStore.js" as EvalTemplatesStore
 import "lib/CommentsBankStore.js" as CommentsBankStore
+import "lib/QuestionnaireGrid.js" as QuestionnaireGrid
+import "lib/QuestionnairePromptBuilder.js" as QuestionnairePromptBuilder
 import "ui"
 
 // GH Classes: one tab per class, weighted-random draw, group generation
@@ -649,6 +651,7 @@ Item {
     else if (mode === "exportCompetencyPdf") root.startCompetencyPdfExport(path)
     else if (mode === "exportEvalGradesCsv") root.startEvalGradesCsvExport(path)
     else if (mode === "exportClassEvalPdf") root.startClassEvalPdfExport(path)
+    else if (mode === "exportQuestionnairePdf") root.startQuestionnairePdfExport(path)
   }
   function cancelPathEntry() { root.pathBarMode = "" }
 
@@ -950,6 +953,24 @@ Item {
     w[String(rowIndex)] = Math.max(0, Math.min(20, points))
     root.correctionDraftWeights = w
   }
+  // Pipeline questionnaire (Gabriel, 2026-10-11). Volontairement un
+  // sélecteur à part plutôt qu'une entrée de plus dans la liste des
+  // grilles de compétences : un questionnaire n'a ni appréciation, ni
+  // paliers, ni critères pondérés — presque tout le reste du formulaire
+  // ci-dessous est hors de propos quand il est choisi, et le masquer est
+  // plus honnête que de laisser Gabriel remplir des champs sans effet.
+  property string correctionDraftPipeline: ""
+  readonly property bool correctionDraftIsQuestionnaire: root.correctionDraftPipeline === "questionnaire"
+  property string correctionDraftQuestionnaireConsignes: ""
+  property int correctionDraftQuestionnaireBareme: 20
+  // Résultat de la dernière lecture de grille.docx — alimenté par le
+  // bouton "Vérifier la grille" ET par la création (même chemin de code),
+  // pour que l'erreur la plus probable de ce pipeline (mauvais fichier,
+  // tableau illisible) se voie avant d'avoir tout rempli.
+  property var correctionDraftQuestionnaireGrid: null // { path, columns, rows }
+  property string correctionDraftQuestionnaireError: ""
+  property bool correctionDraftQuestionnaireReading: false
+
   property string correctionDraftNature: "tp_individuel"
   property string correctionDraftType: "formative"
   property int correctionDraftDuree: 60
@@ -990,6 +1011,12 @@ Item {
     root.correctionDraftExerciseType = ""
     root.correctionDraftGridId = ""
     root.correctionDraftWeights = {}
+    root.correctionDraftPipeline = ""
+    root.correctionDraftQuestionnaireConsignes = ""
+    root.correctionDraftQuestionnaireBareme = 20
+    root.correctionDraftQuestionnaireGrid = null
+    root.correctionDraftQuestionnaireError = ""
+    root.correctionDraftQuestionnaireReading = false
     root.correctionDraftNature = "tp_individuel"
     root.correctionDraftType = "formative"
     root.correctionDraftDuree = 60
@@ -1083,7 +1110,10 @@ Item {
       langueCriteres: root.correctionDraftLangueCriteres,
       criteriaPoints: root.correctionDraftCriteriaPoints,
       notee: root.correctionDraftNotee,
-      bareme: root.correctionDraftBareme
+      bareme: root.correctionDraftBareme,
+      pipeline: root.correctionDraftPipeline,
+      questionnaireConsignes: root.correctionDraftQuestionnaireConsignes,
+      questionnaireBareme: root.correctionDraftQuestionnaireBareme
     })
     if (!t) return
     root.evalTemplates = root.evalTemplates.concat([t])
@@ -1115,6 +1145,14 @@ Item {
     root.correctionDraftCriteriaPoints = t.criteriaPoints
     root.correctionDraftNotee = t.notee
     root.correctionDraftBareme = t.bareme
+    root.correctionDraftPipeline = t.pipeline === "questionnaire" ? "questionnaire" : ""
+    root.correctionDraftQuestionnaireConsignes = t.questionnaireConsignes
+    root.correctionDraftQuestionnaireBareme = t.questionnaireBareme
+    // La grille est un fichier du dossier du devoir, jamais du modèle —
+    // une lecture précédente n'a aucune raison de valoir pour ce
+    // passage-ci.
+    root.correctionDraftQuestionnaireGrid = null
+    root.correctionDraftQuestionnaireError = ""
   }
 
   // Precoche la case "Méthode" seulement pour les types organisés en
@@ -1150,21 +1188,138 @@ Item {
 
   property string _correctionCorrigeCandidate: ""
 
+  // ---- pipeline questionnaire : lecture de la grille de correction -----
+  //
+  // Deux processus argv (jamais de shell), comme partout ailleurs dans ce
+  // fichier : un `find` borné pour retrouver le fichier de grille dans le
+  // dossier du devoir, puis `unzip -p` (docx) ou `head -c` (md/txt) pour
+  // en sortir le contenu. Le parsing, lui, est fait en JS
+  // (QuestionnaireGrid.parse) — l'agent ne voit jamais le fichier, il
+  // reçoit la liste d'items déjà extraite : voir l'en-tête de
+  // lib/QuestionnaireGrid.js pour le pourquoi.
+  //
+  // Le même chemin de code sert au bouton "🔍 Vérifier la grille" du
+  // wizard et à la création elle-même (_questionnaireReadForCreation) :
+  // l'erreur la plus probable de ce pipeline est un mauvais fichier, et
+  // elle doit se voir avant d'avoir rempli tout le formulaire — mais la
+  // création ne doit jamais faire confiance à une vérification faite dix
+  // minutes plus tôt sur un fichier qui a pu changer depuis.
+  property bool _questionnaireReadForCreation: false
+  property string _questionnaireGridPath: ""
+
+  function startQuestionnaireGridRead(folder, forCreation) {
+    var f = root.expandHome(folder).replace(/\/+$/, "")
+    root._questionnaireReadForCreation = !!forCreation
+    root.correctionDraftQuestionnaireError = ""
+    if (!f) {
+      root.correctionDraftQuestionnaireError = "Indiquez d'abord le dossier du devoir."
+      if (forCreation) root.failQuestionnaireCreation(root.correctionDraftQuestionnaireError)
+      root._questionnaireReadForCreation = false
+      return
+    }
+    root.correctionDraftQuestionnaireReading = true
+    questionnaireGridFindProc.command = [
+      "timeout", "-k", "1", "10",
+      "find", f, "-mindepth", "1", "-maxdepth", "1", "-type", "f",
+      "(", "-iname", "grille.docx", "-o", "-iname", "grille.md", "-o", "-iname", "grille.txt", ")"
+    ]
+    questionnaireGridFindProc.running = false
+    questionnaireGridFindProc.running = true
+  }
+
+  function failQuestionnaireGridRead(message) {
+    root.correctionDraftQuestionnaireReading = false
+    root.correctionDraftQuestionnaireGrid = null
+    root.correctionDraftQuestionnaireError = String(message || "")
+    if (root._questionnaireReadForCreation) root.failQuestionnaireCreation(root.correctionDraftQuestionnaireError)
+    root._questionnaireReadForCreation = false
+  }
+
+  function failQuestionnaireCreation(message) {
+    root.correctionCreating = false
+    root._pendingCorrectionDraft = null
+    root._correctionValidateQueue = []
+    root.correctionCreateError = String(message || "")
+  }
+
+  Process {
+    id: questionnaireGridFindProc
+    stdout: StdioCollector { id: questionnaireGridFindOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var lines = String(questionnaireGridFindOut.text || "").split("\n")
+      var found = {}
+      for (var i = 0; i < lines.length; i++) {
+        var path = lines[i].trim()
+        if (!path) continue
+        var base = path.slice(path.lastIndexOf("/") + 1).toLowerCase()
+        if (found[base] === undefined) found[base] = path
+      }
+      // Priorité au .docx : c'est le format dans lequel Gabriel fabrique
+      // ses fiches de correction (ONLYOFFICE), le .md/.txt n'est là que
+      // comme solution de repli.
+      var names = QuestionnaireGrid.GRID_FILENAMES
+      var chosen = ""
+      for (var n = 0; n < names.length; n++) if (found[names[n]]) { chosen = found[names[n]]; break }
+      if (!chosen) {
+        root.failQuestionnaireGridRead("Aucune grille trouvée dans le dossier du devoir — rangez-y votre fiche de correction sous le nom exact \"grille.docx\" (ou grille.md / grille.txt).")
+        return
+      }
+      root._questionnaireGridPath = chosen
+      var cmd = QuestionnaireGrid.isDocx(chosen)
+        ? QuestionnaireGrid.readDocxCommand(chosen)
+        : QuestionnaireGrid.readTextCommand(chosen)
+      if (!cmd) { root.failQuestionnaireGridRead("Chemin de grille invalide."); return }
+      questionnaireGridReadProc.command = cmd
+      questionnaireGridReadProc.running = false
+      questionnaireGridReadProc.running = true
+    }
+  }
+
+  Process {
+    id: questionnaireGridReadProc
+    stdout: StdioCollector { id: questionnaireGridReadOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.failQuestionnaireGridRead("Impossible de lire " + root._questionnaireGridPath + " (fichier corrompu, ou .docx protégé ?).")
+        return
+      }
+      var parsed = QuestionnaireGrid.parse(root._questionnaireGridPath, questionnaireGridReadOut.text || "")
+      if (parsed.error) { root.failQuestionnaireGridRead(parsed.error); return }
+      root.correctionDraftQuestionnaireReading = false
+      root.correctionDraftQuestionnaireError = ""
+      root.correctionDraftQuestionnaireGrid = {
+        path: root._questionnaireGridPath, columns: parsed.columns, rows: parsed.rows
+      }
+      if (root._questionnaireReadForCreation) {
+        root._questionnaireReadForCreation = false
+        var d = root._pendingCorrectionDraft
+        if (!d) return
+        d.questionnaireGridPath = root._questionnaireGridPath
+        d.questionnaireColumns = parsed.columns
+        d.questionnaireRows = parsed.rows
+        root.startCorrectionValidationChain()
+      }
+    }
+  }
+
   function requestCreateEvaluation() {
     var classId = root.currentCorrectionsClassId()
     var cls = root.activeClass()
     if (!classId || !cls) { root.correctionCreateError = "Sélectionnez une classe."; return }
     var title = String(root.correctionDraftTitle || "").trim().slice(0, CorrectionsStore.MAX_TITLE_LEN)
     var folder = root.expandHome(root.correctionDraftFolder).replace(/\/+$/, "")
-    var usesGrid = root.correctionDraftGridId !== ""
+    var isQuestionnaire = root.correctionDraftIsQuestionnaire
+    var usesGrid = !isQuestionnaire && root.correctionDraftGridId !== ""
     // Type d'exercice/surinterprétation/niveau de détail only feed
     // consigne.md, which the grid-first pipeline never reads (see Gabriel,
     // 2026-09-27) — not required, and consigne.md isn't generated at all,
-    // when a grid is selected.
-    if (!usesGrid && !root.correctionDraftExerciseType) { root.correctionCreateError = "Choisissez un type d'exercice."; return }
+    // when a grid is selected. Idem pour le pipeline questionnaire, qui
+    // n'a ni consigne.md ni agent.md : ses seules consignes sont le texte
+    // libre du wizard (Gabriel, 2026-10-11).
+    if (!usesGrid && !isQuestionnaire && !root.correctionDraftExerciseType) { root.correctionCreateError = "Choisissez un type d'exercice."; return }
     if (!title) { root.correctionCreateError = "Donnez un titre au devoir."; return }
     if (!folder) { root.correctionCreateError = "Indiquez le dossier du devoir."; return }
-    if (!root.agentPath) {
+    if (!isQuestionnaire && !root.agentPath) {
       root.correctionCreateError = "Indiquez le fichier agent.md par défaut via le bouton \"🔄 Synchro\" (en haut du panneau)."
       return
     }
@@ -1176,7 +1331,7 @@ Item {
     // est absent.
     var sujet = folder + "/sujet.pdf"
     var agent = root.expandHome(root.agentPath)
-    var consignesText = usesGrid ? "" : ConsignesBuilder.build({
+    var consignesText = (usesGrid || isQuestionnaire) ? "" : ConsignesBuilder.build({
       exerciseType: root.correctionDraftExerciseType,
       natureEvaluation: root.correctionDraftNature,
       typeEvaluation: root.correctionDraftType,
@@ -1196,8 +1351,12 @@ Item {
       sujet: sujet, corrige: "", agent: agent,
       consignesPath: folder + "/consigne.md", consignesText: consignesText,
       exerciseType: root.correctionDraftExerciseType,
-      gridId: root.correctionDraftGridId,
+      gridId: usesGrid ? root.correctionDraftGridId : "",
       criteriaWeights: root.correctionDraftWeights,
+      pipeline: root.correctionDraftPipeline,
+      questionnaireGridPath: "", questionnaireColumns: [], questionnaireRows: [],
+      questionnaireConsignes: root.correctionDraftQuestionnaireConsignes,
+      questionnaireBareme: root.correctionDraftQuestionnaireBareme,
       natureEvaluation: root.correctionDraftNature,
       typeEvaluation: root.correctionDraftType,
       dureeEpreuve: root.correctionDraftDuree,
@@ -1221,7 +1380,21 @@ Item {
     }
     root.correctionCreating = true
     root.correctionCreateError = ""
-    root._correctionCorrigeCandidate = folder + "/corrigé.pdf"
+    // Questionnaire : la grille est relue MAINTENANT, jamais reprise
+    // d'une vérification antérieure (le .docx a pu changer entre-temps) ;
+    // la chaîne de validation habituelle reprend ensuite, à l'identique.
+    if (isQuestionnaire) { root.startQuestionnaireGridRead(folder, true); return }
+    root.startCorrectionValidationChain()
+  }
+
+  // Queue de validation commune aux trois pipelines : corrigé.pdf
+  // (facultatif) d'abord, puis dossier/sujet/agent. Extraite de
+  // requestCreateEvaluation() pour que le pipeline questionnaire puisse
+  // s'y brancher APRÈS la lecture de sa grille (Gabriel, 2026-10-11).
+  function startCorrectionValidationChain() {
+    var d = root._pendingCorrectionDraft
+    if (!d) return
+    root._correctionCorrigeCandidate = d.folder + "/corrigé.pdf"
     correctionCorrigeCheckProc.command = ["test", "-f", root._correctionCorrigeCandidate]
     correctionCorrigeCheckProc.running = false
     correctionCorrigeCheckProc.running = true
@@ -1242,9 +1415,16 @@ Item {
       // for a pre-existing file at that generated path before writing it).
       root._correctionValidateQueue = [
         { flag: "-d", path: root._pendingCorrectionDraft.folder },
-        { flag: "-f", path: root._pendingCorrectionDraft.sujet },
-        { flag: "-f", path: root._pendingCorrectionDraft.agent }
+        { flag: "-f", path: root._pendingCorrectionDraft.sujet }
       ]
+      // agent.md n'est lu que par l'ancien pipeline libre — exiger son
+      // existence pour un questionnaire ferait échouer la création sur un
+      // fichier que l'agent n'ouvrira jamais.
+      if (root._pendingCorrectionDraft.pipeline !== "questionnaire") {
+        root._correctionValidateQueue = root._correctionValidateQueue.concat([
+          { flag: "-f", path: root._pendingCorrectionDraft.agent }
+        ])
+      }
       root.runNextCorrectionValidation()
     }
   }
@@ -1295,7 +1475,7 @@ Item {
     if (!d) return
     // Grid-first évaluations never write consigne.md at all — skip the
     // existence check/overwrite dance entirely (Gabriel, 2026-09-27).
-    if (d.gridId) { root.finalizeCorrectionCreation(); return }
+    if (d.gridId || d.pipeline === "questionnaire") { root.finalizeCorrectionCreation(); return }
     correctionConsignesExistsProc.command = ["test", "-f", d.consignesPath]
     correctionConsignesExistsProc.running = false
     correctionConsignesExistsProc.running = true
@@ -1324,7 +1504,7 @@ Item {
     if (!d) return
     var cls = Store.findClass(root.classes, d.classId)
     if (!cls) return
-    if (!d.gridId) {
+    if (!d.gridId && d.pipeline !== "questionnaire") {
       correctionConsignesSaveFile.path = d.consignesPath
       correctionConsignesSaveFile.setText(d.consignesText)
     }
@@ -1346,7 +1526,13 @@ Item {
       structMethode: d.structMethode, structContenu: d.structContenu, structLangue: d.structLangue,
       methodeCriteres: d.methodeCriteres, contenuCriteres: d.contenuCriteres, langueCriteres: d.langueCriteres,
       criteriaPoints: d.criteriaPoints,
-      notee: d.notee, bareme: d.bareme
+      notee: d.notee, bareme: d.bareme,
+      pipeline: d.pipeline,
+      questionnaireGridPath: d.questionnaireGridPath,
+      questionnaireColumns: d.questionnaireColumns,
+      questionnaireRows: d.questionnaireRows,
+      questionnaireConsignes: d.questionnaireConsignes,
+      questionnaireBareme: d.questionnaireBareme
     })
     root.corrections = CorrectionsStore.setEvaluation(root.corrections, d.classId, evaluation)
     root.persistCorrections()
@@ -1514,7 +1700,9 @@ Item {
       // gridId set → this évaluation uses the grid-first pipeline
       // (CompetencyPromptBuilder) instead of the older single-shot one —
       // see Gabriel, 2026-09-27, [[gh-corrections-plugin]].
-      if (ev && ev.gridId) {
+      if (ev && ev.pipeline === "questionnaire") {
+        root.startQuestionnairePageRender()
+      } else if (ev && ev.gridId) {
         root.startCompetencyGridFill()
       } else {
         root.startCorrectionClaude()
@@ -1740,12 +1928,453 @@ Item {
     correctionProc.running = false
     competencyFillProc.running = false
     competencyAppreciationProc.running = false
+    questionnaireFillProc.running = false
+    questionnairePdfInfoProc.running = false
+    questionnaireRenderProc.running = false
+    questionnaireImagesListProc.running = false
     var ctx = root._correctionRunContext
     if (ctx) root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, { status: "error", error: "Correction annulée." })
     root._correctionRunContext = null
     root._competencyGrid = null
     root.correctionRunningStudentId = ""
     root.correctionQueue = []
+  }
+
+  // ---- questionnaire pipeline (Gabriel, 2026-10-11) ----------------------
+  //
+  // UN SEUL appel headless, en lecture seule (ClaudeRunner.buildCheckCommand,
+  // --allowedTools Read), branché sur la même file/mkdir/anonymisation que
+  // les deux autres pipelines. Contrairement au pipeline grille, il n'y a
+  // pas de second appel : il n'y a pas d'appréciation à rédiger. Et
+  // contrairement aux deux autres, l'agent ne propose aucune note — le
+  // total et la règle de trois sont faits ici par
+  // QuestionnaireGrid.computeNote(), à partir des seules cases qu'il a
+  // cochées.
+  // ---- découpe de la copie en demi-pages avant lecture -----------------
+  //
+  // Gabriel, 2026-10-11, constat du test manuel : à la résolution d'une
+  // page A4 entière, une copie manuscrite se lit mal — il a fallu
+  // découper en demi-pages à 300 dpi pour déchiffrer sans hésiter. Or
+  // l'outil Read redimensionne chaque image reçue à une taille fixe :
+  // envoyer une page entière en 300 dpi ne change donc rien, c'est la
+  // DÉCOUPE qui double la résolution utile, pas le dpi demandé.
+  //
+  // L'agent tournant en lecture seule, il ne peut pas découper lui-même
+  // (ce serait Bash) : le plugin le fait pour lui, ici, avec les outils
+  // poppler déjà utilisés ailleurs dans ce fichier (qpdf pour
+  // l'anonymisation). Un recouvrement de quelques pour cent évite qu'une
+  // ligne tombant pile sur la coupe soit perdue des deux côtés.
+  //
+  // Tout échec de cette étape est NON BLOQUANT : on retombe sur le PDF
+  // lui-même, que l'agent sait lire — une copie lue un peu moins bien
+  // vaut mieux qu'une correction qui échoue.
+  readonly property int questionnaireRenderDpi: 200
+  readonly property real questionnaireHalfOverlap: 0.04
+  property var _questionnairePageImages: []
+
+  function startQuestionnairePageRender() {
+    var ctx = root._correctionRunContext
+    if (!ctx) return
+    root._questionnairePageImages = []
+    questionnairePdfInfoProc.command = ["timeout", "-k", "1", "20", "pdfinfo", ctx.anonymizedCopyPath]
+    questionnairePdfInfoProc.running = false
+    questionnairePdfInfoProc.running = true
+  }
+
+  Process {
+    id: questionnairePdfInfoProc
+    stdout: StdioCollector { id: questionnairePdfInfoOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var ctx = root._correctionRunContext
+      if (!ctx) return
+      var m = String(questionnairePdfInfoOut.text || "").match(/Page size:\s*([0-9.]+)\s*x\s*([0-9.]+)\s*pts/)
+      if (exitCode !== 0 || !m) { root.startQuestionnaireFill(); return }
+      var dpi = root.questionnaireRenderDpi
+      var wPx = Math.round(Number(m[1]) / 72 * dpi)
+      var hPx = Math.round(Number(m[2]) / 72 * dpi)
+      if (!(wPx > 0 && hPx > 0)) { root.startQuestionnaireFill(); return }
+      var overlap = Math.round(hPx * root.questionnaireHalfOverlap)
+      var topH = Math.round(hPx / 2) + overlap
+      var botY = Math.max(0, Math.round(hPx / 2) - overlap)
+      root._questionnaireRenderPlan = [
+        { prefix: ctx.runDir + "/haut", y: 0, h: topH },
+        { prefix: ctx.runDir + "/bas", y: botY, h: hPx - botY }
+      ]
+      root._questionnaireRenderWidth = wPx
+      root.runNextQuestionnaireRender()
+    }
+  }
+
+  property var _questionnaireRenderPlan: []
+  property int _questionnaireRenderWidth: 0
+
+  function runNextQuestionnaireRender() {
+    var ctx = root._correctionRunContext
+    if (!ctx) return
+    if (root._questionnaireRenderPlan.length === 0) { root.listQuestionnairePageImages(); return }
+    var next = root._questionnaireRenderPlan[0]
+    root._questionnaireRenderPlan = root._questionnaireRenderPlan.slice(1)
+    questionnaireRenderProc.command = [
+      "timeout", "-k", "1", "120",
+      "pdftoppm", "-r", String(root.questionnaireRenderDpi), "-png",
+      "-x", "0", "-y", String(next.y),
+      "-W", String(root._questionnaireRenderWidth), "-H", String(next.h),
+      "--", ctx.anonymizedCopyPath, next.prefix
+    ]
+    questionnaireRenderProc.running = false
+    questionnaireRenderProc.running = true
+  }
+
+  Process {
+    id: questionnaireRenderProc
+    onExited: function(exitCode) {
+      if (exitCode !== 0) { root._questionnairePageImages = []; root.startQuestionnaireFill(); return }
+      root.runNextQuestionnaireRender()
+    }
+  }
+
+  function listQuestionnairePageImages() {
+    var ctx = root._correctionRunContext
+    if (!ctx) return
+    questionnaireImagesListProc.command = [
+      "timeout", "-k", "1", "10",
+      "find", ctx.runDir, "-mindepth", "1", "-maxdepth", "1", "-type", "f", "-name", "*.png"
+    ]
+    questionnaireImagesListProc.running = false
+    questionnaireImagesListProc.running = true
+  }
+
+  Process {
+    id: questionnaireImagesListProc
+    stdout: StdioCollector { id: questionnaireImagesListOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      // pdftoppm numérote "<prefix>-1.png", "<prefix>-01.png"… selon le
+      // nombre de pages : on retrie donc sur le numéro extrait, pas sur
+      // la chaîne, puis on entrelace haut/bas page par page pour que
+      // l'agent lise la copie dans l'ordre où elle a été écrite.
+      var lines = String(questionnaireImagesListOut.text || "").split("\n")
+      var byPage = {}
+      for (var i = 0; i < lines.length; i++) {
+        var path = lines[i].trim()
+        if (!path) continue
+        var m = path.match(/\/(haut|bas)-0*([0-9]+)\.png$/)
+        if (!m) continue
+        var page = Number(m[2])
+        if (!byPage[page]) byPage[page] = {}
+        byPage[page][m[1]] = path
+      }
+      var pages = Object.keys(byPage).map(Number).sort(function(a, b) { return a - b })
+      var out = []
+      for (var p = 0; p < pages.length; p++) {
+        var entry = byPage[pages[p]]
+        if (entry.haut) out.push({ label: "page " + pages[p] + ", moitié haute", path: entry.haut })
+        if (entry.bas) out.push({ label: "page " + pages[p] + ", moitié basse", path: entry.bas })
+      }
+      root._questionnairePageImages = out
+      root.startQuestionnaireFill()
+    }
+  }
+
+  function startQuestionnaireFill() {
+    var ctx = root._correctionRunContext
+    if (!ctx) return
+    var ev = CorrectionsStore.getEvaluation(root.corrections, ctx.classId)
+    if (!ev) { root.finalizeCorrectionError("Évaluation introuvable."); return }
+    if (!ev.questionnaireRows || ev.questionnaireRows.length === 0) {
+      root.finalizeCorrectionError("Aucun item dans la grille de cette évaluation — recréez-la après avoir corrigé le fichier de grille.")
+      return
+    }
+    var entry = CorrectionsStore.studentEntry(ev, ctx.studentId)
+    var isWritingException = ev.writingExceptions.indexOf(ctx.studentId) !== -1
+    var writingMode = isWritingException
+      ? (ev.writingMode === "manuscrit" ? "tapuscrit" : "manuscrit")
+      : ev.writingMode
+
+    var prompt = QuestionnairePromptBuilder.buildFillPrompt({
+      copyPath: ctx.anonymizedCopyPath,
+      writingMode: writingMode,
+      sujetPath: ev.sujetPath,
+      corrigePath: ev.corrigePath,
+      niveauClasse: ev.niveauClasse,
+      columns: ev.questionnaireColumns,
+      rows: ev.questionnaireRows,
+      consignes: ev.questionnaireConsignes,
+      addendum: entry.addendum,
+      pageImages: root._questionnairePageImages
+    })
+    // Écrit à côté des sorties du run comme les autres pipelines — c'est
+    // ce qui permet de relire après coup ce qui a réellement été envoyé.
+    correctionPromptFile.path = ctx.runDir + "/prompt.txt"
+    correctionPromptFile.setText(prompt)
+
+    questionnaireFillProc.command = ClaudeRunner.buildCheckCommand(prompt)
+    questionnaireFillProc.running = false
+    questionnaireFillProc.running = true
+  }
+
+  Process {
+    id: questionnaireFillProc
+    stdout: StdioCollector { id: questionnaireFillOut; waitForEnd: true }
+    stderr: StdioCollector { id: questionnaireFillErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.finalizeCorrectionError((questionnaireFillErr.text || "Échec de la correction du questionnaire.").slice(0, 500))
+        return
+      }
+      root.finalizeQuestionnaireRun(questionnaireFillOut.text || "")
+    }
+  }
+
+  function finalizeQuestionnaireRun(output) {
+    var ctx = root._correctionRunContext
+    if (!ctx) return
+    var ev = CorrectionsStore.getEvaluation(root.corrections, ctx.classId)
+    if (!ev) { root.finalizeCorrectionError("Évaluation introuvable."); return }
+    var parsed = QuestionnairePromptBuilder.parseFilled(output, ev.questionnaireRows, ev.questionnaireColumns)
+    var logTrim = String(parsed.log || "").trim()
+    var vigilance = (logTrim !== "" && logTrim.toUpperCase() !== "RAS") ? logTrim : ""
+
+    // Le log de cette copie = les arbitrages item par item + les points de
+    // vigilance généraux. Les arbitrages y sont repris (en plus d'être
+    // affichés sous leur ligne dans le popover) pour que "📄 Log" reste le
+    // même point d'entrée que sur les deux autres pipelines, et pour que
+    // le marqueur "à relire" se déclenche sur la bonne chose : ici, ce
+    // n'est pas la lisibilité globale qui compte, ce sont les cas limites.
+    var doubtLines = []
+    ev.questionnaireRows.forEach(function(row, idx) {
+      var d = String(parsed.doubts[String(idx)] || "").trim()
+      if (!d) return
+      doubtLines.push("- [" + (idx + 1) + "] " + QuestionnaireGrid.plainLabel(row.text) + " → " + d)
+    })
+    var parts = []
+    if (parsed.missing.length > 0) {
+      parts.push("- ⚠ Items non cochés par l'agent (comptés 0) : " + parsed.missing.join(", "))
+    }
+    if (doubtLines.length > 0) parts.push("## Arbitrages\n" + doubtLines.join("\n"))
+    if (vigilance) parts.push("## Points de vigilance\n" + vigilance)
+    var displayedLog = parts.join("\n\n")
+
+    root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, {
+      status: "done",
+      questionnaireChecks: parsed.checks,
+      questionnaireAnswers: parsed.answers,
+      questionnaireDoubts: parsed.doubts,
+      log: displayedLog,
+      needsReview: displayedLog !== "",
+      error: "",
+      reviewed: false,
+      addendum: "",
+      logItemStates: {},
+      // Une recorrection repart du calcul automatique : garder une note
+      // saisie à la main sur des cases qui viennent de changer en ferait
+      // un chiffre sans rapport avec la grille affichée.
+      noteSevere: "", noteBienveillante: ""
+    })
+    // Les demi-pages pèsent ~6 Mo par copie : les garder ferait grossir
+    // ~/.local/state de 200 Mo par classe corrigée, et de nouveau à
+    // chaque recorrection. Elles ne servent plus une fois la grille
+    // remplie — prompt.txt, lui, reste, c'est ce qui permet de relire
+    // après coup ce qui a été envoyé. Suppression bornée au dossier de
+    // CE run et au seul motif *.png, qu'on vient d'y créer.
+    questionnaireCleanupProc.command = [
+      "timeout", "-k", "1", "15",
+      "find", ctx.runDir, "-mindepth", "1", "-maxdepth", "1", "-type", "f", "-name", "*.png", "-delete"
+    ]
+    questionnaireCleanupProc.running = false
+    questionnaireCleanupProc.running = true
+
+    root._correctionRunContext = null
+    root._questionnairePageImages = []
+    root.correctionRunningStudentId = ""
+    root.processCorrectionQueue()
+  }
+
+  // Nettoyage de confort : son échec n'a aucune conséquence sur la
+  // correction, qui est déjà enregistrée à ce stade.
+  Process { id: questionnaireCleanupProc }
+
+  // Note toujours recalculée, jamais mise en cache — même raison que
+  // competencyLiveNote() (Gabriel, 2026-09-27 : les notes stockées
+  // finissaient systématiquement désynchronisées de la grille).
+  function questionnaireComputed(studentId) {
+    var ev = root.activeEvaluation()
+    if (!ev || ev.pipeline !== "questionnaire" || !studentId) return null
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    return QuestionnaireGrid.computeNote(ev.questionnaireRows, entry.questionnaireChecks,
+      (ev.questionnaireColumns || []).length, ev.questionnaireBareme)
+  }
+
+  // Ce qui est affiché/exporté : la correction manuelle si Gabriel en a
+  // enregistré une, sinon le calcul. noteSevere est réutilisé comme
+  // champ d'override, exactement comme dans le pipeline grille.
+  function questionnaireEffectiveNoteLabel(studentId) {
+    var ev = root.activeEvaluation()
+    if (!ev) return ""
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    if (entry.noteSevere !== "") return entry.noteSevere + " / " + ev.questionnaireBareme
+    var computed = root.questionnaireComputed(studentId)
+    return computed ? computed.noteLabel : ""
+  }
+
+  function saveQuestionnaireNote(studentId, note) {
+    var classId = root.currentCorrectionsClassId()
+    if (!classId || !studentId) return
+    root.setCorrectionStudentPatch(classId, studentId, { noteSevere: String(note || "").trim() })
+  }
+
+  function resetQuestionnaireNoteOverride(studentId) {
+    var classId = root.currentCorrectionsClassId()
+    if (!classId || !studentId) return
+    root.setCorrectionStudentPatch(classId, studentId, { noteSevere: "", noteBienveillante: "" })
+  }
+
+  // ---- popover "Grille" du pipeline questionnaire ------------------------
+
+  property string questionnairePopoverStudentId: ""
+  function openQuestionnairePopover(studentId) { root.questionnairePopoverStudentId = studentId }
+  function closeQuestionnairePopover() { root.questionnairePopoverStudentId = "" }
+
+  function questionnairePopoverEntry() {
+    var ev = root.activeEvaluation()
+    if (!ev || !root.questionnairePopoverStudentId) return CorrectionsStore.emptyStudentEntry()
+    return CorrectionsStore.studentEntry(ev, root.questionnairePopoverStudentId)
+  }
+
+  function questionnairePopoverStudentLabel() {
+    var cls = root.activeClass()
+    var student = root.findStudentById(cls, root.questionnairePopoverStudentId)
+    return student ? Store.studentLabel(student) : ""
+  }
+
+  function questionnaireTallyLabel(studentId) {
+    var ev = root.activeEvaluation()
+    if (!ev || ev.pipeline !== "questionnaire") return ""
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    var cols = ev.questionnaireColumns || []
+    var t = QuestionnaireGrid.tally(ev.questionnaireRows, entry.questionnaireChecks, cols)
+    var parts = cols.map(function(c, i) {
+      return c + " : " + t.counts[i] + " × " + QuestionnaireGrid.columnPointsLabel(i, cols.length) + " pt"
+    })
+    if (t.missing > 0) parts.push("non coché : " + t.missing)
+    return parts.join("   ·   ")
+  }
+
+  function questionnaireMissingCount(studentId) {
+    var ev = root.activeEvaluation()
+    if (!ev || ev.pipeline !== "questionnaire") return 0
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    return QuestionnaireGrid.tally(ev.questionnaireRows, entry.questionnaireChecks, ev.questionnaireColumns || []).missing
+  }
+
+  // Gabriel corrige une case à la main. Recliquer la case déjà cochée la
+  // décoche : sur un questionnaire, "je ne tranche pas encore" est un
+  // état utile (il veut rouvrir la copie), et c'est le seul moyen d'y
+  // revenir une fois une case posée.
+  function setQuestionnaireCheck(rowIndex, colIndex) {
+    var classId = root.currentCorrectionsClassId()
+    var ev = root.activeEvaluation()
+    var studentId = root.questionnairePopoverStudentId
+    if (!ev || !classId || !studentId) return
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    var checks = {}
+    for (var k in entry.questionnaireChecks) checks[k] = entry.questionnaireChecks[k]
+    if (checks[String(rowIndex)] === colIndex) delete checks[String(rowIndex)]
+    else checks[String(rowIndex)] = colIndex
+    root.setCorrectionStudentPatch(classId, studentId, { questionnaireChecks: checks })
+  }
+
+  // ---- popover "Grille" : export PDF -------------------------------------
+  // Même barre de saisie de chemin partagée que les autres exports (voir
+  // confirmPathEntry) — le popover se ferme d'abord, c'est une modale
+  // plein écran qui recouvrirait la barre.
+  property bool questionnaireExportIncludeDetails: true
+  property string _questionnaireExportStudentId: ""
+  property string questionnairePdfExportError: ""
+  property string questionnairePdfExportedPath: ""
+  property string _pendingQuestionnairePdfPath: ""
+  readonly property string questionnaireExportSrcPath: root.stateDir + "/.ghclasses-questionnaire-export.typ"
+  // FileView.setText n'émet pas onSaved quand le contenu est identique —
+  // sans ce garde-fou, réexporter deux fois la même grille ne
+  // relancerait jamais la compilation (même correctif que
+  // _competencyExportLastSrc).
+  property string _questionnaireExportLastSrc: ""
+
+  function requestExportQuestionnairePdf(studentId, includeDetails) {
+    root._questionnaireExportStudentId = studentId
+    root.questionnaireExportIncludeDetails = includeDetails
+    root.closeQuestionnairePopover()
+    var cls = root.activeClass()
+    var student = root.findStudentById(cls, studentId)
+    root.pathBarMode = "exportQuestionnairePdf"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/grille-" + root.slugify(student ? Store.studentLabel(student) : studentId) + "-" + ts + ".pdf"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  function buildQuestionnaireTypst(studentId) {
+    var ev = root.activeEvaluation()
+    var cls = root.activeClass()
+    if (!ev || ev.pipeline !== "questionnaire" || !cls) return ""
+    var student = root.findStudentById(cls, studentId)
+    if (!student) return ""
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    var computed = QuestionnaireGrid.computeNote(ev.questionnaireRows, entry.questionnaireChecks,
+      (ev.questionnaireColumns || []).length, ev.questionnaireBareme)
+    var noteLabel = entry.noteSevere !== ""
+      ? (entry.noteSevere + " / " + ev.questionnaireBareme)
+      : computed.noteLabel
+    return QuestionnaireGrid.buildTypstSource(
+      Store.studentLabel(student), cls.name, ev.title,
+      ev.questionnaireColumns, ev.questionnaireRows,
+      {
+        checks: entry.questionnaireChecks,
+        answers: entry.questionnaireAnswers,
+        doubts: entry.questionnaireDoubts,
+        includeAnswers: root.questionnaireExportIncludeDetails,
+        rawLabel: computed.rawLabel,
+        noteLabel: noteLabel
+      })
+  }
+
+  function startQuestionnairePdfExport(destPath) {
+    var src = root.buildQuestionnaireTypst(root._questionnaireExportStudentId)
+    if (!src) return
+    root.questionnairePdfExportError = ""
+    root.questionnairePdfExportedPath = ""
+    root._pendingQuestionnairePdfPath = destPath
+    if (src === root._questionnaireExportLastSrc) {
+      root._startQuestionnairePdfCompile()
+    } else {
+      root._questionnaireExportLastSrc = src
+      questionnaireExportSrcFile.setText(src)
+    }
+  }
+
+  function _startQuestionnairePdfCompile() {
+    questionnairePdfCompileProc.command = ["typst", "compile", root.questionnaireExportSrcPath, root._pendingQuestionnairePdfPath]
+    questionnairePdfCompileProc.running = false
+    questionnairePdfCompileProc.running = true
+  }
+
+  FileView {
+    id: questionnaireExportSrcFile
+    path: root.questionnaireExportSrcPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root._startQuestionnairePdfCompile()
+  }
+
+  Process {
+    id: questionnairePdfCompileProc
+    stderr: StdioCollector { id: questionnairePdfCompileErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.questionnairePdfExportError = (questionnairePdfCompileErr.text || "Échec de l'export PDF.").slice(0, 500)
+        return
+      }
+      root.questionnairePdfExportedPath = root._pendingQuestionnairePdfPath
+    }
   }
 
   // ---- grid-first pipeline (Gabriel, 2026-09-27) -------------------------
@@ -3898,6 +4527,31 @@ Item {
                 textFormat: Text.PlainText
               }
 
+              // Même raison d'être au même endroit : l'export de la
+              // grille d'un questionnaire ferme lui aussi son popover
+              // avant d'ouvrir la barre de chemin.
+              Text {
+                visible: root.questionnairePdfExportedPath !== ""
+                width: parent.width
+                text: "Grille exportée : " + root.questionnairePdfExportedPath
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.questionnairePdfExportError !== ""
+                width: parent.width
+                text: root.questionnairePdfExportError
+                color: Color.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+              }
+
               // ===================================================== tirage
 
               Column {
@@ -4546,8 +5200,42 @@ Item {
 
                   PanelSeparator { foreground: root.foreground; width: parent.width }
 
+                  // Gabriel, 2026-10-11 : choisir d'abord CE QU'ON
+                  // CORRIGE, parce que ça décide de la quasi-totalité du
+                  // reste du formulaire. Un questionnaire n'a ni
+                  // appréciation à rédiger, ni paliers, ni critères à
+                  // pondérer — tous ces champs disparaissent plutôt que
+                  // de rester là sans effet.
                   Column {
-                    visible: root.correctionDraftGridId === ""
+                    width: parent.width
+                    spacing: Style.spacing.xxs
+                    Text { text: "Ce que l'agent doit produire"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                    Dropdown {
+                      width: parent.width
+                      options: [
+                        { value: "", label: "Une appréciation rédigée (devoir rédigé)" },
+                        { value: "questionnaire", label: "Une grille de questionnaire cochée (sans appréciation)" }
+                      ]
+                      value: root.correctionDraftPipeline
+                      foreground: root.foreground
+                      background: root.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onChanged: function(v) { root.correctionDraftPipeline = v }
+                    }
+                    Text {
+                      visible: root.correctionDraftIsQuestionnaire
+                      width: parent.width
+                      text: "L'agent compare chaque réponse de la copie à la réponse attendue, coche une case par item et signale les cas qu'il a dû trancher. Il ne rédige aucune appréciation et ne calcule aucune note : le total et la règle de trois sont faits par le plugin à partir des cases."
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                    }
+                  }
+
+                  Column {
+                    visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                     width: parent.width
                     spacing: Style.spacing.xxs
                     Text { text: "Type d'exercice"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
@@ -4573,6 +5261,7 @@ Item {
                   }
 
                   Column {
+                    visible: !root.correctionDraftIsQuestionnaire
                     width: parent.width
                     spacing: Style.spacing.xxs
                     Text { text: "Grille de compétences (pipeline agent)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
@@ -4668,11 +5357,160 @@ Item {
 
                   Text {
                     width: parent.width
-                    text: "Le sujet et le corrigé sont retrouvés automatiquement dans le dossier ci-dessus, sous les noms \"sujet.pdf\" (obligatoire) et \"corrigé.pdf\" (facultatif)."
+                    text: root.correctionDraftIsQuestionnaire
+                      ? "Le sujet et la grille de correction sont retrouvés automatiquement dans le dossier ci-dessus, sous les noms \"sujet.pdf\" (obligatoire) et \"grille.docx\" (obligatoire — .md ou .txt acceptés aussi). Un \"corrigé.pdf\" supplémentaire est facultatif."
+                      : "Le sujet et le corrigé sont retrouvés automatiquement dans le dossier ci-dessus, sous les noms \"sujet.pdf\" (obligatoire) et \"corrigé.pdf\" (facultatif)."
                     color: Qt.darker(root.foreground, 1.4)
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                     wrapMode: Text.WordWrap
+                  }
+
+                  // ---- bloc propre au pipeline questionnaire ----
+                  Column {
+                    visible: root.correctionDraftIsQuestionnaire
+                    width: parent.width
+                    spacing: Style.spacing.sm
+
+                    PanelSeparator { foreground: root.foreground; width: parent.width }
+
+                    Text { text: "Grille de correction"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+
+                    Text {
+                      width: parent.width
+                      text: "Un tableau : première ligne = l'en-tête (la première cellule nomme la colonne des items, les suivantes sont les cases à cocher), puis un item par ligne avec la réponse attendue dans la première cellule. Les cases valent 0 à 1 réparti de gauche à droite — trois colonnes donnent 0 / 0,5 / 1."
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                    }
+
+                    Text {
+                      width: parent.width
+                      text: "Mise en italique dans la grille : un passage en italique est traité comme un élément complémentaire, que l'agent ignore pour décider de la case (ex. « épithète détaché de limpidité », avec « détaché » en italique). L'italique ne compte que s'il contraste avec du texte non italique dans la même ligne — un tableau entièrement en italique est lu comme s'il ne l'était pas."
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.italic: true
+                      wrapMode: Text.WordWrap
+                    }
+
+                    Row {
+                      spacing: Style.spacing.controlGap
+                      Button {
+                        text: root.correctionDraftQuestionnaireReading ? "Lecture…" : "🔍 Vérifier la grille"
+                        bordered: true
+                        enabled: !root.correctionDraftQuestionnaireReading && root.correctionDraftFolder.trim() !== ""
+                        foreground: root.foreground
+                        accent: root.accent
+                        onClicked: root.startQuestionnaireGridRead(root.correctionDraftFolder, false)
+                      }
+                      Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.correctionDraftQuestionnaireGrid !== null
+                        text: root.correctionDraftQuestionnaireGrid
+                          ? ("✔ " + root.correctionDraftQuestionnaireGrid.rows.length + " items  ·  cases : " + root.correctionDraftQuestionnaireGrid.columns.join(" / "))
+                          : ""
+                        color: root.gradeValidatedColor
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        textFormat: Text.PlainText
+                      }
+                    }
+
+                    Text {
+                      visible: root.correctionDraftQuestionnaireError !== ""
+                      width: parent.width
+                      text: root.correctionDraftQuestionnaireError
+                      color: Color.urgent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                      textFormat: Text.PlainText
+                    }
+
+                    Column {
+                      visible: root.correctionDraftQuestionnaireGrid !== null
+                      width: parent.width
+                      spacing: Style.spacing.xxs
+                      Repeater {
+                        model: root.correctionDraftQuestionnaireGrid
+                          ? root.correctionDraftQuestionnaireGrid.rows.slice(0, 5)
+                          : []
+                        delegate: Text {
+                          required property var modelData
+                          required property int index
+                          width: parent.width
+                          text: (index + 1) + ".  " + modelData.text
+                          color: Qt.darker(root.foreground, 1.5)
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                          elide: Text.ElideRight
+                          textFormat: Text.PlainText
+                        }
+                      }
+                      Text {
+                        visible: !!(root.correctionDraftQuestionnaireGrid && root.correctionDraftQuestionnaireGrid.rows.length > 5)
+                        text: root.correctionDraftQuestionnaireGrid
+                          ? ("… et " + (root.correctionDraftQuestionnaireGrid.rows.length - 5) + " autres")
+                          : ""
+                        color: Qt.darker(root.foreground, 1.5)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
+
+                    Dropdown {
+                      width: Style.space(200)
+                      label: "Note finale sur"
+                      options: [
+                        { value: "20", label: "/ 20" },
+                        { value: "15", label: "/ 15" },
+                        { value: "10", label: "/ 10" },
+                        { value: "5", label: "/ 5" }
+                      ]
+                      value: String(root.correctionDraftQuestionnaireBareme)
+                      foreground: root.foreground
+                      background: root.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onChanged: function(v) { root.correctionDraftQuestionnaireBareme = Number(v) }
+                    }
+
+                    Text { text: "Consignes pour l'agent"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                    Text {
+                      width: parent.width
+                      text: "Dites ici dans quel cas cocher quelle case, et surtout jusqu'où être sévère sur une réponse juste mais incomplète : c'est le seul vrai réglage de ce pipeline, l'agent n'a aucun seuil par défaut."
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                    }
+                    Rectangle {
+                      width: parent.width
+                      height: Style.space(150)
+                      radius: Style.cornerRadius
+                      color: Style.normalFillFor(root.foreground, root.accent)
+                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                      border.width: 1
+                      ScrollView {
+                        anchors.fill: parent
+                        anchors.margins: Style.space(6)
+                        clip: true
+                        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                        TextArea {
+                          id: questionnaireConsignesField
+                          wrapMode: TextArea.Wrap
+                          color: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.body
+                          background: null
+                          text: root.correctionDraftQuestionnaireConsignes
+                          placeholderText: "Ex. Non = ni la nature ni la fonction n'est juste. Partiel = l'une des deux seulement. Oui = les deux. Pour un mot sans fonction, la seule nature juste suffit pour Oui."
+                          onTextChanged: root.correctionDraftQuestionnaireConsignes = text
+                        }
+                      }
+                    }
                   }
 
                   PanelSeparator { foreground: root.foreground; width: parent.width }
@@ -4689,7 +5527,7 @@ Item {
                     // convention as "Type d'exercice"/"Niveau de
                     // surinterprétation"/"Niveau de détail" above.
                     Dropdown {
-                      visible: root.correctionDraftGridId === ""
+                      visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                       width: parent.width
                       label: "Nature de l'évaluation"
                       options: ConsignesBuilder.NATURE_OPTIONS
@@ -4702,7 +5540,7 @@ Item {
                     }
 
                     Dropdown {
-                      visible: root.correctionDraftGridId === ""
+                      visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                       width: parent.width
                       label: "Type d'évaluation"
                       options: ConsignesBuilder.TYPE_OPTIONS
@@ -4715,7 +5553,7 @@ Item {
                     }
 
                     NumberField {
-                      visible: root.correctionDraftGridId === ""
+                      visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                       label: "Durée de l'épreuve (minutes)"
                       value: root.correctionDraftDuree
                       from: 5
@@ -4740,6 +5578,7 @@ Item {
                     }
 
                     Column {
+                      visible: !root.correctionDraftIsQuestionnaire
                       width: parent.width
                       spacing: Style.spacing.xxs
                       Text { text: "Niveau de bienveillance : " + root.correctionDraftBienveillance + "/10"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
@@ -4755,7 +5594,7 @@ Item {
                     }
 
                     Toggle {
-                      visible: root.correctionDraftGridId === ""
+                      visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                       width: parent.width
                       label: "Prise de notes acceptée"
                       description: "Sinon, une rédaction complète est exigée."
@@ -4767,7 +5606,7 @@ Item {
                     }
 
                     Toggle {
-                      visible: root.correctionDraftGridId === ""
+                      visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                       width: parent.width
                       label: "Sujet à traiter intégralement"
                       description: "Coché = une copie incomplète doit être signalée comme telle."
@@ -4780,7 +5619,7 @@ Item {
 
 
                     Dropdown {
-                      visible: root.correctionDraftGridId === ""
+                      visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                       width: parent.width
                       label: "Niveau de surinterprétation"
                       options: ConsignesBuilder.SURINTERPRETATION_OPTIONS
@@ -4793,7 +5632,7 @@ Item {
                     }
 
                     Dropdown {
-                      visible: root.correctionDraftGridId === ""
+                      visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                       width: parent.width
                       label: "Niveau de détail de l'appréciation"
                       options: ConsignesBuilder.DETAIL_OPTIONS
@@ -4812,7 +5651,7 @@ Item {
                   // applyStructureDefaultsForType() pour la précoche par type.
 
                   Column {
-                    visible: root.correctionDraftGridId === ""
+                    visible: root.correctionDraftGridId === "" && !root.correctionDraftIsQuestionnaire
                     width: parent.width
                     spacing: Style.spacing.md
                     Text { text: "Structure de l'appréciation"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
@@ -5087,6 +5926,7 @@ Item {
                   }
 
                   Column {
+                    visible: !root.correctionDraftIsQuestionnaire
                     width: parent.width
                     spacing: Style.spacing.xxs
                     Text { text: "Compléments propres à cette évaluation"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
@@ -5120,6 +5960,11 @@ Item {
                   PanelSeparator { foreground: root.foreground; width: parent.width }
 
                   Text {
+                    // Le pipeline questionnaire ne lit ni agent.md ni
+                    // consigne.md : tout ce qu'il sait de la correction
+                    // tient dans la grille et dans la case "Consignes
+                    // pour l'agent" ci-dessus.
+                    visible: !root.correctionDraftIsQuestionnaire
                     width: parent.width
                     text: "Agent (markdown) : " + (root.agentPath || "non configuré") + " — réglage global, voir le bouton \"🔄 Synchro\" en haut."
                     color: Qt.darker(root.foreground, 1.4)
@@ -5236,7 +6081,7 @@ Item {
                         onClicked: root.openWeightsPopover()
                       }
                       Dropdown {
-                        visible: !!(root.activeEvaluation() && !root.activeEvaluation().gridId)
+                        visible: !!(root.activeEvaluation() && !root.activeEvaluation().gridId && root.activeEvaluation().pipeline !== "questionnaire")
                         width: Style.space(160)
                         options: ConsignesBuilder.DETAIL_OPTIONS
                         value: root.activeEvaluation() ? root.activeEvaluation().niveauDetail : "moyen"
@@ -5304,11 +6149,18 @@ Item {
                           textFormat: Text.PlainText
                         }
 
+                        // Un questionnaire ne produit aucune appréciation :
+                        // sans cette branche, une copie corrigée resterait
+                        // affichée "pas encore corrigée". Ce qui en tient
+                        // lieu, c'est le décompte par case.
+                        readonly property bool usesQuestionnaire: !!(root.activeEvaluation() && root.activeEvaluation().pipeline === "questionnaire")
+
                         Text {
                           width: parent.width
                           text: correctionRow.entry.excluded ? "Retiré(e) de la correction."
                             : correctionRow.entry.status === "running" ? "Correction en cours…"
                             : correctionRow.entry.status === "error" ? ("Échec : " + correctionRow.entry.error)
+                            : (correctionRow.usesQuestionnaire && correctionRow.entry.status === "done") ? root.questionnaireTallyLabel(correctionRow.modelData.id)
                             : correctionRow.entry.appreciation !== "" ? correctionRow.entry.appreciation
                             : correctionRow.entry.copyPath !== "" ? "Copie rattachée, pas encore corrigée."
                             : "Copie non rattachée."
@@ -5322,7 +6174,7 @@ Item {
                         readonly property bool usesGrid: !!(root.activeEvaluation() && root.activeEvaluation().gridId)
 
                         ButtonGroup {
-                          visible: !correctionRow.entry.excluded && correctionRow.entry.status === "done" && !correctionRow.usesGrid
+                          visible: !correctionRow.entry.excluded && correctionRow.entry.status === "done" && !correctionRow.usesGrid && !correctionRow.usesQuestionnaire
                           width: parent.width
                           options: [
                             { value: "severe", label: "Sévère : " + (correctionRow.entry.grades.severe || "—") },
@@ -5352,6 +6204,16 @@ Item {
                           color: root.foreground
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.bodySmall
+                        }
+
+                        Text {
+                          visible: !correctionRow.entry.excluded && correctionRow.entry.status === "done" && correctionRow.usesQuestionnaire
+                          text: "Note : " + (root.questionnaireEffectiveNoteLabel(correctionRow.modelData.id) || "—")
+                            + (correctionRow.entry.noteSevere !== "" ? "  (corrigée à la main)" : "")
+                          color: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          textFormat: Text.PlainText
                         }
 
                         Flow {
@@ -5397,6 +6259,7 @@ Item {
                             spacing: Style.spacing.xs
 
                             Button {
+                              visible: !correctionRow.usesQuestionnaire
                               text: "📋 Copier le code"
                               bordered: true
                               enabled: correctionRow.entry.appreciation !== ""
@@ -5441,6 +6304,15 @@ Item {
                             foreground: root.foreground
                             accent: root.accent
                             onClicked: root.openCompetencyGridPopover(correctionRow.modelData.id)
+                          }
+                          Button {
+                            visible: !correctionRow.entry.excluded && correctionRow.usesQuestionnaire
+                            text: "🧾 Grille"
+                            bordered: true
+                            enabled: correctionRow.entry.status === "done"
+                            foreground: root.foreground
+                            accent: root.accent
+                            onClicked: root.openQuestionnairePopover(correctionRow.modelData.id)
                           }
                           Button {
                             visible: !correctionRow.entry.excluded && correctionRow.entry.status === "done"
@@ -6487,6 +7359,43 @@ Item {
         onResetNoteOverrideRequested: root.resetCompetencyNoteOverride(root.competencyGridPopoverStudentId)
         onCopyOpenRequested: root.openCompetencyGridCopy()
         onExportRequested: function(includeJustifications) { root.requestExportCompetencyPdf(root.competencyGridPopoverStudentId, includeJustifications) }
+      }
+
+      QuestionnaireGridPopover {
+        anchors.fill: parent
+        opened: root.questionnairePopoverStudentId !== ""
+        studentLabel: root.questionnairePopoverStudentLabel()
+        columns: root.activeEvaluation() ? root.activeEvaluation().questionnaireColumns : []
+        rows: root.activeEvaluation() ? root.activeEvaluation().questionnaireRows : []
+        checks: root.questionnairePopoverEntry().questionnaireChecks
+        answers: root.questionnairePopoverEntry().questionnaireAnswers
+        doubts: root.questionnairePopoverEntry().questionnaireDoubts
+        // note = ce qui pré-remplit le champ éditable : la correction
+        // manuelle si elle existe, sinon le calcul. liveNote/liveRaw
+        // restent toujours le calcul, affichés à côté.
+        note: root.questionnairePopoverEntry().noteSevere !== ""
+          ? root.questionnairePopoverEntry().noteSevere
+          : (root.questionnaireComputed(root.questionnairePopoverStudentId)
+            ? String(root.questionnaireComputed(root.questionnairePopoverStudentId).noteLabel).split(" /")[0]
+            : "")
+        liveNote: root.questionnaireComputed(root.questionnairePopoverStudentId)
+          ? root.questionnaireComputed(root.questionnairePopoverStudentId).noteLabel : ""
+        liveRaw: root.questionnaireComputed(root.questionnairePopoverStudentId)
+          ? root.questionnaireComputed(root.questionnairePopoverStudentId).rawLabel : ""
+        tallyLabel: root.questionnaireTallyLabel(root.questionnairePopoverStudentId)
+        hasNoteOverride: root.questionnairePopoverEntry().noteSevere !== ""
+        missingCount: root.questionnaireMissingCount(root.questionnairePopoverStudentId)
+        copyPath: root.questionnairePopoverEntry().copyPath
+        foreground: root.foreground
+        background: root.background
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onCanceled: root.closeQuestionnairePopover()
+        onCheckChanged: function(rowIndex, colIndex) { root.setQuestionnaireCheck(rowIndex, colIndex) }
+        onNoteSaved: function(note) { root.saveQuestionnaireNote(root.questionnairePopoverStudentId, note) }
+        onResetNoteOverrideRequested: root.resetQuestionnaireNoteOverride(root.questionnairePopoverStudentId)
+        onCopyOpenRequested: root.openCorrectionCopy(root.questionnairePopoverEntry().copyPath)
+        onExportRequested: function(includeDetails) { root.requestExportQuestionnairePdf(root.questionnairePopoverStudentId, includeDetails) }
       }
 
       CriteriaWeightsPopover {

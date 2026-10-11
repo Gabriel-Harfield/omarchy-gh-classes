@@ -101,27 +101,40 @@ Item {
           Keys.onEscapePressed: root.canceled()
         }
 
-        Text {
-          visible: root.filteredGroups.length === 0
-          text: root.bank.length === 0
-            ? "La banque de commentaires est vide pour l'instant."
-            : "Aucun commentaire ne correspond à ce filtre."
-          color: Qt.darker(root.foreground, 1.6)
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          font.italic: true
-          wrapMode: Text.WordWrap
-          width: parent.width
-        }
-
-        ScrollView {
+        // Wrapped in a fixed, always-visible Item (not a Column child whose
+        // OWN visibility toggles) — see [[qml-flow-anchors-gotcha]]: the
+        // ScrollView below sizes itself off its auto-assigned y position in
+        // the outer Column, which shifts whenever a SIBLING's visibility
+        // flips (e.g. going from zero filtered results back to some). That
+        // reflow could transiently desync the ScrollView's height, hiding
+        // an otherwise-intact bank until a full restart. This Item's own
+        // height never changes, so the Column above it never needs to
+        // reflow when the filter match count changes — only the two
+        // children below toggle, inside a plain Item, which is safe.
+        Item {
           width: parent.width
           height: parent.height - y
-          clip: true
-          visible: root.filteredGroups.length > 0
-          ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-          Column {
+          Text {
+            visible: root.filteredGroups.length === 0
+            text: root.bank.length === 0
+              ? "La banque de commentaires est vide pour l'instant."
+              : "Aucun commentaire ne correspond à ce filtre."
+            color: Qt.darker(root.foreground, 1.6)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            font.italic: true
+            wrapMode: Text.WordWrap
+            width: parent.width
+          }
+
+          ScrollView {
+            anchors.fill: parent
+            clip: true
+            visible: root.filteredGroups.length > 0
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+            Column {
             width: parent.width
             spacing: Style.spacing.md
 
@@ -227,4 +240,5 @@ Item {
       root._pendingDeleteId = ""
     }
   }
+}
 }

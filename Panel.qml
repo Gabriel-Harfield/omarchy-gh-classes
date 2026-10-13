@@ -652,6 +652,8 @@ Item {
     else if (mode === "exportEvalGradesCsv") root.startEvalGradesCsvExport(path)
     else if (mode === "exportClassEvalPdf") root.startClassEvalPdfExport(path)
     else if (mode === "exportQuestionnairePdf") root.startQuestionnairePdfExport(path)
+    else if (mode === "exportQuestionnaireCsv") root.startQuestionnaireCsvExport(path)
+    else if (mode === "exportQuestionnaireClassPdf") root.startQuestionnaireClassPdfExport(path)
   }
   function cancelPathEntry() { root.pathBarMode = "" }
 
@@ -2207,13 +2209,32 @@ Item {
   // Ce qui est affiché/exporté : la correction manuelle si Gabriel en a
   // enregistré une, sinon le calcul. noteSevere est réutilisé comme
   // champ d'override, exactement comme dans le pipeline grille.
+  // Avec la correction 1/3 temps : "16 / 20 → 16,5 / 20 (1/3 temps)".
   function questionnaireEffectiveNoteLabel(studentId) {
     var ev = root.activeEvaluation()
     if (!ev) return ""
+    var info = root.questionnaireNoteInfo(ev, CorrectionsStore.studentEntry(ev, studentId))
+    if (!info.baseLabel) return ""
+    return info.applied ? (info.baseLabel + " → " + info.finalLabel + " (1/3 temps)") : info.baseLabel
+  }
+
+  // Un seul calcul pour l'écran, le PDF et le CSV — voir
+  // QuestionnaireGrid.noteInfo(). Note brute (noteSevere si corrigée à la
+  // main) → éventuelle marge 1/3 temps, toujours recalculée.
+  function questionnaireNoteInfo(ev, entry) {
+    return QuestionnaireGrid.noteInfo(ev.questionnaireRows, entry.questionnaireChecks,
+      (ev.questionnaireColumns || []).length, ev.questionnaireBareme, entry.noteSevere, entry.tiersTemps)
+  }
+
+  // Bascule : la note finale est recalculée depuis la note brute à chaque
+  // affichage, donc cliquer deux fois annule, et une recorrection ne
+  // cumule jamais la marge.
+  function toggleQuestionnaireTiersTemps(studentId) {
+    var classId = root.currentCorrectionsClassId()
+    var ev = root.activeEvaluation()
+    if (!classId || !ev || !studentId) return
     var entry = CorrectionsStore.studentEntry(ev, studentId)
-    if (entry.noteSevere !== "") return entry.noteSevere + " / " + ev.questionnaireBareme
-    var computed = root.questionnaireComputed(studentId)
-    return computed ? computed.noteLabel : ""
+    root.setCorrectionStudentPatch(classId, studentId, { tiersTemps: !entry.tiersTemps })
   }
 
   function saveQuestionnaireNote(studentId, note) {
@@ -2318,22 +2339,158 @@ Item {
     var student = root.findStudentById(cls, studentId)
     if (!student) return ""
     var entry = CorrectionsStore.studentEntry(ev, studentId)
-    var computed = QuestionnaireGrid.computeNote(ev.questionnaireRows, entry.questionnaireChecks,
-      (ev.questionnaireColumns || []).length, ev.questionnaireBareme)
-    var noteLabel = entry.noteSevere !== ""
-      ? (entry.noteSevere + " / " + ev.questionnaireBareme)
-      : computed.noteLabel
     return QuestionnaireGrid.buildTypstSource(
       Store.studentLabel(student), cls.name, ev.title,
       ev.questionnaireColumns, ev.questionnaireRows,
-      {
-        checks: entry.questionnaireChecks,
-        answers: entry.questionnaireAnswers,
-        doubts: entry.questionnaireDoubts,
-        includeAnswers: root.questionnaireExportIncludeDetails,
-        rawLabel: computed.rawLabel,
-        noteLabel: noteLabel
-      })
+      root.questionnaireTypstPayload(ev, entry, root.questionnaireExportIncludeDetails))
+  }
+
+  function questionnaireTypstPayload(ev, entry, includeAnswers) {
+    var info = root.questionnaireNoteInfo(ev, entry)
+    return {
+      checks: entry.questionnaireChecks,
+      answers: entry.questionnaireAnswers,
+      doubts: entry.questionnaireDoubts,
+      includeAnswers: includeAnswers,
+      rawLabel: info.rawLabel,
+      noteLabel: info.baseLabel,
+      finalLabel: info.finalLabel,
+      tiersTemps: info.applied,
+      scaled: info.scaled
+    }
+  }
+
+  // ---- export de classe : CSV des notes + PDF de toutes les grilles ------
+  // (Gabriel, 2026-10-13) Même esprit que les exports de l'onglet Eval.
+  // Compétences. Le PDF groupé n'embarque JAMAIS les lectures/arbitrages de
+  // l'agent (includeAnswers: false) — Gabriel les imprime à la demande
+  // depuis le popover "Grille" d'un élève.
+  property string questionnaireCsvExportedPath: ""
+  property string questionnaireClassPdfExportError: ""
+  property string questionnaireClassPdfExportedPath: ""
+  property string _pendingQuestionnaireClassPdfPath: ""
+  property string _questionnaireClassExportLastSrc: ""
+  readonly property string questionnaireClassExportSrcPath: root.stateDir + "/.ghclasses-questionnaire-class-export.typ"
+
+  // Élèves dans l'ordre alphabétique, hors "retirés".
+  function _questionnaireStudentsSorted() {
+    var cls = root.activeClass()
+    if (!cls) return []
+    return cls.students.slice().sort(function(a, b) { return a.nom.localeCompare(b.nom) })
+  }
+
+  function buildQuestionnaireCsv() {
+    var ev = root.activeEvaluation()
+    var cls = root.activeClass()
+    if (!ev || ev.pipeline !== "questionnaire" || !cls) return ""
+    var maxItems = (ev.questionnaireRows || []).length
+    var lines = ["Devoir;Classe;Élève;Points bruts (/" + maxItems + ");Note (/" + ev.questionnaireBareme
+      + ");1/3 temps;Note finale (/" + ev.questionnaireBareme + ")"]
+    root._questionnaireStudentsSorted().forEach(function(s) {
+      var entry = CorrectionsStore.studentEntry(ev, s.id)
+      if (entry.excluded) return
+      var fields = [ev.title, cls.name, Store.studentLabel(s)]
+      if (entry.status === "done") {
+        var info = root.questionnaireNoteInfo(ev, entry)
+        fields.push(QuestionnaireGrid.formatNote(info.computed.raw), info.baseValue, info.applied ? "oui" : "", info.finalValue)
+      } else {
+        fields.push("", "", "", "")
+      }
+      lines.push(fields.map(function(f) { return Draw.csvField(f) }).join(";"))
+    })
+    return lines.join("\n") + "\n"
+  }
+
+  function exportQuestionnaireCsv() {
+    var cls = root.activeClass()
+    var ev = root.activeEvaluation()
+    if (!cls || !ev) return
+    root.pathBarMode = "exportQuestionnaireCsv"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/notes-" + root.slugify(cls.name) + "-" + root.slugify(ev.title) + "-" + ts + ".csv"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  function startQuestionnaireCsvExport(destPath) {
+    root.questionnaireCsvExportedPath = ""
+    questionnaireCsvExportFile.path = destPath
+    var csv = root.buildQuestionnaireCsv()
+    Qt.callLater(function() { questionnaireCsvExportFile.setText(csv) })
+  }
+
+  FileView {
+    id: questionnaireCsvExportFile
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root.questionnaireCsvExportedPath = questionnaireCsvExportFile.path
+  }
+
+  function buildQuestionnaireClassTypst() {
+    var ev = root.activeEvaluation()
+    var cls = root.activeClass()
+    if (!ev || ev.pipeline !== "questionnaire" || !cls) return ""
+    var entries = []
+    root._questionnaireStudentsSorted().forEach(function(s) {
+      var entry = CorrectionsStore.studentEntry(ev, s.id)
+      if (entry.excluded || entry.status !== "done") return
+      entries.push({ studentLabel: Store.studentLabel(s), payload: root.questionnaireTypstPayload(ev, entry, false) })
+    })
+    if (!entries.length) return ""
+    return QuestionnaireGrid.buildClassTypst(cls.name, ev.title, ev.questionnaireColumns, ev.questionnaireRows, entries)
+  }
+
+  function exportQuestionnaireClassPdf() {
+    var cls = root.activeClass()
+    var ev = root.activeEvaluation()
+    if (!cls || !ev) return
+    root.pathBarMode = "exportQuestionnaireClassPdf"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/grilles-" + root.slugify(cls.name) + "-" + root.slugify(ev.title) + "-" + ts + ".pdf"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  function startQuestionnaireClassPdfExport(destPath) {
+    var src = root.buildQuestionnaireClassTypst()
+    root.questionnaireClassPdfExportError = ""
+    root.questionnaireClassPdfExportedPath = ""
+    if (!src) { root.questionnaireClassPdfExportError = "Aucune copie corrigée à exporter."; return }
+    root._pendingQuestionnaireClassPdfPath = destPath
+    // Même garde-fou que _questionnaireExportLastSrc : setText n'émet pas
+    // onSaved si le contenu est identique.
+    if (src === root._questionnaireClassExportLastSrc) {
+      root._startQuestionnaireClassPdfCompile()
+    } else {
+      root._questionnaireClassExportLastSrc = src
+      questionnaireClassExportSrcFile.setText(src)
+    }
+  }
+
+  function _startQuestionnaireClassPdfCompile() {
+    questionnaireClassPdfCompileProc.command = ["typst", "compile", root.questionnaireClassExportSrcPath, root._pendingQuestionnaireClassPdfPath]
+    questionnaireClassPdfCompileProc.running = false
+    questionnaireClassPdfCompileProc.running = true
+  }
+
+  FileView {
+    id: questionnaireClassExportSrcFile
+    path: root.questionnaireClassExportSrcPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root._startQuestionnaireClassPdfCompile()
+  }
+
+  Process {
+    id: questionnaireClassPdfCompileProc
+    stderr: StdioCollector { id: questionnaireClassPdfCompileErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.questionnaireClassPdfExportError = (questionnaireClassPdfCompileErr.text || "Échec de l'export PDF.").slice(0, 500)
+        return
+      }
+      root.questionnaireClassPdfExportedPath = root._pendingQuestionnaireClassPdfPath
+    }
   }
 
   function startQuestionnairePdfExport(destPath) {
@@ -4452,6 +4609,8 @@ Item {
                     : root.pathBarMode === "exportCompetencyPdf" ? "Exporter la fiche (.pdf) vers :"
                     : root.pathBarMode === "exportEvalGradesCsv" ? "Exporter les notes de la classe (.csv) vers :"
                     : root.pathBarMode === "exportClassEvalPdf" ? "Exporter les fiches corrigées (.pdf) vers :"
+                    : root.pathBarMode === "exportQuestionnaireCsv" ? "Exporter les notes du questionnaire (.csv) vers :"
+                    : root.pathBarMode === "exportQuestionnaireClassPdf" ? "Exporter toutes les grilles corrigées (.pdf) vers :"
                     : "Exporter les statistiques (.csv) vers :"
                   color: Qt.darker(root.foreground, 1.4)
                   font.family: root.fontFamily
@@ -4545,6 +4704,39 @@ Item {
                 visible: root.questionnairePdfExportError !== ""
                 width: parent.width
                 text: root.questionnairePdfExportError
+                color: Color.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.questionnaireCsvExportedPath !== ""
+                width: parent.width
+                text: "Notes exportées : " + root.questionnaireCsvExportedPath
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.questionnaireClassPdfExportedPath !== ""
+                width: parent.width
+                text: "Grilles exportées : " + root.questionnaireClassPdfExportedPath
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.questionnaireClassPdfExportError !== ""
+                width: parent.width
+                text: root.questionnaireClassPdfExportError
                 color: Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -6101,6 +6293,30 @@ Item {
                     }
                   }
 
+                  // Exports de classe du pipeline questionnaire (Gabriel,
+                  // 2026-10-13). Ligne à part plutôt que dans l'en-tête
+                  // ci-dessus : cette Row est ancrée à droite et ne se
+                  // replie pas si la fenêtre est étroite.
+                  Row {
+                    visible: !!(root.activeEvaluation() && root.activeEvaluation().pipeline === "questionnaire")
+                    spacing: Style.spacing.controlGap
+
+                    Button {
+                      text: "📊 Exporter les notes (.csv)"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.exportQuestionnaireCsv()
+                    }
+                    Button {
+                      text: "📑 Exporter toutes les grilles corrigées (.pdf)"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.exportQuestionnaireClassPdf()
+                    }
+                  }
+
                   PanelSeparator { foreground: root.foreground; width: parent.width }
 
                   Column {
@@ -6313,6 +6529,14 @@ Item {
                             foreground: root.foreground
                             accent: root.accent
                             onClicked: root.openQuestionnairePopover(correctionRow.modelData.id)
+                          }
+                          Button {
+                            visible: !correctionRow.entry.excluded && correctionRow.usesQuestionnaire && correctionRow.entry.status === "done"
+                            text: correctionRow.entry.tiersTemps ? "✔ Correction 1/3 temps appliquée" : "⏱ Appliquer correction 1/3 temps"
+                            bordered: true
+                            foreground: root.foreground
+                            accent: root.accent
+                            onClicked: root.toggleQuestionnaireTiersTemps(correctionRow.modelData.id)
                           }
                           Button {
                             visible: !correctionRow.entry.excluded && correctionRow.entry.status === "done"

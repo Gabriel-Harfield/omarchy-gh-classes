@@ -10,7 +10,7 @@ Importante pour la correction des vacances : ne pas l'oublier.
   titres « Aptitude… » du paragraphe argumenté en *italique* (propriété `italic`
   sur les lignes, gérée dans l'export Typst/Markdown).
 - `ui/CompetencyGridPopover.qml` : 2 lignes `font.italic`.
-- Mise à jour 2026-10-17 : plan = 2 critères ajoutés en tête (problématique, sous-parties) et plus de « Savoir organiser son travail » ; l'introduction n'a plus le critère orthographe/syntaxe ;
+- Mise à jour 2026-10-17 (+ harmonisation de style : plus de 1re personne dans les grilles, « formuler », « engagée ») : plan = 2 critères ajoutés en tête (problématique, sous-parties) et plus de « Savoir organiser son travail » ; l'introduction n'a plus le critère orthographe/syntaxe ;
   nouveau titre « EXPRESSION ÉCRITE ET MISE EN PAGE » (mise en page + items langue,
   en remplacement de « Maîtrise de la langue… ») ; « Mon paragraphe » au singulier.
   Les numéros de ligne de CETTE grille ont donc changé par rapport au premier

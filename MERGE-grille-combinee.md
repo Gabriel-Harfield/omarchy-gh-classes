@@ -10,7 +10,14 @@ Importante pour la correction des vacances : ne pas l'oublier.
   titres « Aptitude… » du paragraphe argumenté en *italique* (propriété `italic`
   sur les lignes, gérée dans l'export Typst/Markdown).
 - `ui/CompetencyGridPopover.qml` : 2 lignes `font.italic`.
-- Aucune ligne existante réordonnée : les réponses déjà saisies restent valides.
+- Mise à jour 2026-10-17 : l'introduction n'a plus le critère orthographe/syntaxe ;
+  nouveau titre « EXPRESSION ÉCRITE ET MISE EN PAGE » (mise en page + items langue,
+  en remplacement de « Maîtrise de la langue… ») ; « Mon paragraphe » au singulier.
+  Les numéros de ligne de CETTE grille ont donc changé par rapport au premier
+  commit ; les pondérations (competencyWeights) de la grille
+  `plan-introduction-et-paragraphe` ont été migrées dans classes.json (Dropbox).
+  Si Ostrog a de son côté des coches/poids enregistrés pour cette grille avant la
+  fusion, ils seraient décalés : prévenir Gabriel.
 
 ## Instructions pour l'agent (autre machine)
 1. Vérifier que le travail en cours (onglet Corrections) est commité ; sinon

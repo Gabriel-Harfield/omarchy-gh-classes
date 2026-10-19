@@ -218,6 +218,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     text: rowRoot.modelData.text
                     font.bold: true
+                    font.italic: !!rowRoot.modelData.italic
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
@@ -234,6 +235,7 @@ Item {
                   Text {
                     width: parent.width - root.cellsTotalWidth
                     text: (rowRoot.modelData.level > 1 ? "    " : "") + (root.doubts[String(rowRoot.index)] ? "⚠ " : "") + rowRoot.modelData.text
+                    font.italic: !!rowRoot.modelData.italic
                     color: root.doubts[String(rowRoot.index)] ? "#c98a3a" : root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall

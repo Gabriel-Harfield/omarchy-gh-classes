@@ -19,6 +19,7 @@ Item {
   property var grid: null // CompetencyGrids grid object ({ id, name, rows })
   property var checks: ({}) // { "<rowIndex>": colIndex }
   property var justifications: ({}) // { "<rowIndex>": text }
+  property var doubts: ({}) // { "<rowIndex>": true } — agent hesitated, Gabriel to decide
   property string appreciation: ""
   // "Effective" note: Gabriel's hand-typed override if he's saved one,
   // otherwise the live automatic calculation — this is what pre-fills the
@@ -32,6 +33,12 @@ Item {
   property bool hasNoteOverride: false
   property string copyPath: ""
   property bool regenerating: false
+  // "Commentaire guidé" grids (Gabriel, 2026-10-15): the appreciation block is
+  // replaced by the agent's bullet comments, shown and edited here exactly
+  // like the Eval. Compétences tab's "Commentaires" section.
+  property bool bulletsMode: false
+  property var bullets: [] // [{ id, text, tag, isNew }]
+  property int bulletCap: 0
   property color foreground: Color.foreground
   property color background: Color.background
   property color accent: Color.accent
@@ -49,6 +56,8 @@ Item {
       appreciationField.text = root.appreciation
       noteField.text = root.note
       addendumField.text = ""
+      bulletDraftField.text = ""
+      root.bulletCap = 0
       root.includeJustificationsInExport = false
       root.appreciationLength = "moyenne"
     }
@@ -80,6 +89,11 @@ Item {
   // alongside the grid in the exported PDF — off by default (Gabriel,
   // 2026-09-27): the default export is just the table + appréciation + note.
   signal exportRequested(bool includeJustifications)
+  signal bulletAdded(string text)
+  signal bulletRemoved(string id)
+  signal bulletBanked(string id)
+  signal bankInsertRequested()
+  signal bulletsRegenerateRequested(int cap)
 
   readonly property int cellColWidth: Style.space(90)
   readonly property int cellsTotalWidth: cellColWidth * 4 + Style.spacing.xs * 4
@@ -219,8 +233,8 @@ Item {
 
                   Text {
                     width: parent.width - root.cellsTotalWidth
-                    text: (rowRoot.modelData.level > 1 ? "    " : "") + rowRoot.modelData.text
-                    color: root.foreground
+                    text: (rowRoot.modelData.level > 1 ? "    " : "") + (root.doubts[String(rowRoot.index)] ? "⚠ " : "") + rowRoot.modelData.text
+                    color: root.doubts[String(rowRoot.index)] ? "#c98a3a" : root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                     wrapMode: Text.WordWrap
@@ -260,6 +274,17 @@ Item {
                   }
                 }
 
+                Text {
+                  visible: rowRoot.modelData.checkable && !!root.doubts[String(rowRoot.index)]
+                  width: parent.width - root.cellsTotalWidth
+                  text: "⚠ L'agent a hésité entre deux paliers sur ce critère : à toi de trancher (cliquer une case valide ton choix)."
+                  color: "#c98a3a"
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  wrapMode: Text.WordWrap
+                }
+
                 // Agent's own reasoning for this cell — informational only,
                 // Gabriel corrects the PALIER above if he disagrees rather
                 // than editing this text (see [[gh-corrections-plugin]]).
@@ -278,7 +303,142 @@ Item {
           }
 
           Column {
-            visible: root.grid !== null
+            visible: root.grid !== null && root.bulletsMode
+            width: parent.width
+            spacing: Style.spacing.xxs
+
+            Text { text: "Commentaires"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+
+            Text {
+              visible: root.bullets.length === 0
+              width: parent.width
+              text: "Aucun commentaire pour cette copie."
+              color: Qt.darker(root.foreground, 1.5)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Repeater {
+              model: root.bullets
+              delegate: Row {
+                id: bulletRow
+                required property var modelData
+                width: parent ? parent.width : 0
+                spacing: Style.spacing.sm
+
+                Text {
+                  width: parent.width - bulletButtons.width - parent.spacing
+                  text: "• " + bulletRow.modelData.text
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  textFormat: Text.PlainText
+                  wrapMode: Text.WordWrap
+                }
+
+                Row {
+                  id: bulletButtons
+                  spacing: Style.spacing.xs
+
+                  Button {
+                    visible: bulletRow.modelData.isNew
+                    text: "＋ Banque"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: root.accent
+                    tooltipText: "Enregistre ce commentaire dans la banque pour le réutiliser plus tard"
+                    onClicked: root.bulletBanked(bulletRow.modelData.id)
+                  }
+
+                  Text {
+                    text: "×"
+                    color: Qt.darker(root.foreground, 1.3)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.title
+                    font.bold: true
+
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    MouseArea {
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(6)
+                      onClicked: root.bulletRemoved(bulletRow.modelData.id)
+                    }
+                  }
+                }
+              }
+            }
+
+            TextField {
+              id: bulletDraftField
+              width: parent.width
+              placeholderText: "Nouveau commentaire…"
+              foreground: root.foreground
+              accent: root.accent
+              Keys.onReturnPressed: { root.bulletAdded(bulletDraftField.text); bulletDraftField.text = "" }
+              Keys.onEnterPressed: { root.bulletAdded(bulletDraftField.text); bulletDraftField.text = "" }
+            }
+
+            Row {
+              spacing: Style.spacing.controlGap
+
+              Button {
+                text: "➕ Ajouter"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                tooltipText: "Ajoute ce texte comme commentaire pour cet élève uniquement"
+                onClicked: { root.bulletAdded(bulletDraftField.text); bulletDraftField.text = "" }
+              }
+              Button {
+                text: "📚 Insérer depuis la banque"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                tooltipText: "Parcourir/filtrer les commentaires déjà enregistrés"
+                onClicked: root.bankInsertRequested()
+              }
+            }
+
+            Row {
+              spacing: Style.spacing.controlGap
+
+              Item {
+                width: regenerateBulletsButton.implicitWidth
+                height: bulletCapDropdown.implicitHeight
+                Button {
+                  id: regenerateBulletsButton
+                  anchors.bottom: parent.bottom
+                  text: root.regenerating ? "🔄 Régénération en cours…" : "🔄 Régénérer les commentaires"
+                  bordered: true
+                  enabled: !root.regenerating
+                  foreground: root.foreground
+                  accent: root.accent
+                  tooltipText: "Réécrit la liste depuis la grille telle qu'elle est maintenant (sans relire la copie). Remplace les commentaires actuels."
+                  onClicked: root.bulletsRegenerateRequested(root.bulletCap)
+                }
+              }
+
+              Dropdown {
+                id: bulletCapDropdown
+                label: "Nombre"
+                options: [
+                  { value: "0", label: "Libre (selon la gravité)" },
+                  { value: "1", label: "1 par catégorie" },
+                  { value: "2", label: "2 par catégorie" },
+                  { value: "3", label: "3 par catégorie" }
+                ]
+                value: String(root.bulletCap)
+                foreground: root.foreground
+                background: root.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onChanged: function(value) { root.bulletCap = parseInt(value, 10) }
+              }
+            }
+          }
+
+          Column {
+            visible: root.grid !== null && !root.bulletsMode
             width: parent.width
             spacing: Style.spacing.xxs
 

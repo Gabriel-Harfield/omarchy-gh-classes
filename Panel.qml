@@ -19,6 +19,8 @@ import "lib/ConsignesBuilder.js" as ConsignesBuilder
 import "lib/CompetencyGrids.js" as CompetencyGrids
 import "lib/Spellcheck.js" as Spellcheck
 import "lib/CompetencyPromptBuilder.js" as CompetencyPromptBuilder
+import "lib/CommentGuidePromptBuilder.js" as CommentGuidePromptBuilder
+import "lib/ArchiveStore.js" as ArchiveStore
 import "lib/CorrectionAssistantPromptBuilder.js" as CorrectionAssistantPromptBuilder
 import "lib/EvalTemplatesStore.js" as EvalTemplatesStore
 import "lib/CommentsBankStore.js" as CommentsBankStore
@@ -912,6 +914,23 @@ Item {
     correctionConsignesSaveFile.setText(consignesText)
   }
 
+  // Model/effort the correction agent runs with, per évaluation and changeable
+  // at any time (Gabriel, 2026-10-15). Read from the run's own évaluation
+  // (not the currently-displayed one — a run may outlive a class switch).
+  function setEvaluationAgentOptions(model, effort) {
+    var classId = root.currentCorrectionsClassId()
+    var ev = CorrectionsStore.getEvaluation(root.corrections, classId)
+    if (!ev) return
+    root.corrections = CorrectionsStore.setEvaluation(root.corrections, classId, CorrectionsStore.withAgentOptions(ev, model, effort))
+    root.persistCorrections()
+  }
+
+  function correctionRunAgentOpts() {
+    var ctx = root._correctionRunContext
+    var ev = ctx ? CorrectionsStore.getEvaluation(root.corrections, ctx.classId) : null
+    return ev ? { model: ev.agentModel, effort: ev.agentEffort } : {}
+  }
+
   function setCorrectionStudentPatch(classId, studentId, patch) {
     var ev = CorrectionsStore.getEvaluation(root.corrections, classId)
     if (!ev) return
@@ -1556,9 +1575,163 @@ Item {
     var classId = root.currentCorrectionsClassId()
     root.correctionReplaceConfirmOpen = false
     if (!classId) return
+    // The évaluation in place is archived FIRST and only deleted once the
+    // archive file is confirmed written (Gabriel, 2026-10-15) — if the
+    // archive can't be written, nothing is replaced.
+    if (CorrectionsStore.getEvaluation(root.corrections, classId)) { root.startArchive("replace"); return }
+    root._completeReplaceEvaluation(classId)
+  }
+
+  function _completeReplaceEvaluation(classId) {
     root.corrections = CorrectionsStore.deleteEvaluation(root.corrections, classId)
     root.persistCorrections()
     root.resetCorrectionDraft()
+  }
+
+  // ---- archives (Gabriel, 2026-10-15) — see lib/ArchiveStore.js ----------
+  //
+  // Written to Dropbox (folder chosen by Gabriel). The payload goes through a
+  // temp file in the state dir (FileView, atomic) and is then `cp`'d to the
+  // archive folder by a Process whose exit code tells us whether it really
+  // landed — FileView has no failure signal, and an evaluation's JSON is too
+  // big to pass as a command-line argument.
+  readonly property string correctionsArchiveDir: root.homeDir + "/Dropbox/Travail/Correction automatique/archives"
+  readonly property string archiveTmpPath: root.stateDir + "/.archive-pending.json"
+  property string archiveFeedback: ""
+  property bool _archiveInFlight: false
+  property string _archiveThen: ""        // "manual" | "replace" | "restore"
+  property string _archiveClassId: ""
+  property string _archiveDestPath: ""
+  property var _pendingRestoreEvaluation: null
+  property bool archivesPopoverOpen: false
+  property var archiveEntries: []
+
+  FileView {
+    id: archiveTmpFile
+    path: root.archiveTmpPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root._archiveCopyToDest()
+  }
+
+  Timer {
+    id: archiveTimeout
+    interval: 10000
+    repeat: false
+    onTriggered: if (root._archiveInFlight) root._archiveFailed("L'archive n'a pas pu être écrite (délai dépassé).")
+  }
+
+  function startArchive(then) {
+    if (root._archiveInFlight) return
+    var classId = root.currentCorrectionsClassId()
+    var ev = CorrectionsStore.getEvaluation(root.corrections, classId)
+    if (!ev) { root.archiveFeedback = "Aucune évaluation à archiver pour cette classe."; return }
+    var cls = Store.findClass(root.classes, classId)
+    var now = new Date()
+    root._archiveInFlight = true
+    root._archiveThen = then
+    root._archiveClassId = classId
+    root._archiveDestPath = root.correctionsArchiveDir + "/" + ArchiveStore.buildFilename(classId, ev, now)
+    root.archiveFeedback = "Archivage en cours…"
+    archiveTimeout.restart()
+    archiveTmpFile.setText(ArchiveStore.makePayload(classId, cls ? cls.name : "", ev, now))
+  }
+
+  function _archiveCopyToDest() {
+    if (!root._archiveInFlight) return
+    archiveCopyProc.command = ["sh", "-c", 'cp -- "$1" "$2" && test -s "$2"; r=$?; rm -f "$1"; exit $r', "_", root.archiveTmpPath, root._archiveDestPath]
+    archiveCopyProc.running = false
+    archiveCopyProc.running = true
+  }
+
+  Process {
+    id: archiveCopyProc
+    onExited: function(exitCode) {
+      if (!root._archiveInFlight) return
+      if (exitCode === 0) root._archiveSucceeded()
+      else root._archiveFailed("Impossible d'écrire dans le dossier d'archives.")
+    }
+  }
+
+  function _archiveSucceeded() {
+    archiveTimeout.stop()
+    var then = root._archiveThen
+    var classId = root._archiveClassId
+    var name = root._archiveDestPath.split("/").pop()
+    root._archiveInFlight = false
+    root._archiveThen = ""
+    root.archiveFeedback = "✔ Archivé : " + name
+    if (then === "replace") root._completeReplaceEvaluation(classId)
+    else if (then === "restore") root._applyPendingRestore()
+    if (root.archivesPopoverOpen) root.refreshArchiveList()
+  }
+
+  function _archiveFailed(message) {
+    archiveTimeout.stop()
+    var then = root._archiveThen
+    root._archiveInFlight = false
+    root._archiveThen = ""
+    root._pendingRestoreEvaluation = null
+    root.archiveFeedback = message + (then === "replace" ? " L'évaluation n'a PAS été remplacée." : (then === "restore" ? " Rien n'a été restauré." : ""))
+  }
+
+  function openArchivesPopover() {
+    root.archivesPopoverOpen = true
+    root.refreshArchiveList()
+  }
+  function closeArchivesPopover() { root.archivesPopoverOpen = false }
+
+  function refreshArchiveList() {
+    archiveListProc.command = ["sh", "-c", 'ls -1 -- "$1" 2>/dev/null', "_", root.correctionsArchiveDir]
+    archiveListProc.running = false
+    archiveListProc.running = true
+  }
+
+  Process {
+    id: archiveListProc
+    stdout: StdioCollector { id: archiveListOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var names = String(archiveListOut.text || "").split("\n").filter(function(n) { return n !== "" })
+      root.archiveEntries = ArchiveStore.listFor(names, root.currentCorrectionsClassId())
+    }
+  }
+
+  property string _restoreClassId: ""
+
+  function requestRestoreArchive(file) {
+    if (root._archiveInFlight) return
+    root._restoreClassId = root.currentCorrectionsClassId()
+    root.archiveFeedback = "Lecture de l'archive…"
+    archiveReadProc.command = ["cat", "--", root.correctionsArchiveDir + "/" + file]
+    archiveReadProc.running = false
+    archiveReadProc.running = true
+  }
+
+  Process {
+    id: archiveReadProc
+    stdout: StdioCollector { id: archiveReadOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) { root.archiveFeedback = "Impossible de lire l'archive."; return }
+      var parsed = ArchiveStore.parsePayload(archiveReadOut.text, root._restoreClassId)
+      if (parsed.error) { root.archiveFeedback = parsed.error; return }
+      var ev = CorrectionsStore.sanitizeEvaluation(parsed.evaluation)
+      if (!ev) { root.archiveFeedback = "Archive invalide : évaluation inexploitable."; return }
+      root._pendingRestoreEvaluation = ev
+      // The évaluation currently in place (if any) is archived first.
+      if (CorrectionsStore.getEvaluation(root.corrections, root._restoreClassId)) root.startArchive("restore")
+      else root._applyPendingRestore()
+    }
+  }
+
+  function _applyPendingRestore() {
+    var ev = root._pendingRestoreEvaluation
+    var classId = root._restoreClassId
+    root._pendingRestoreEvaluation = null
+    if (!ev || !classId) return
+    root.corrections = CorrectionsStore.setEvaluation(root.corrections, classId, ev)
+    root.persistCorrections()
+    root.archiveFeedback = "✔ Évaluation restaurée : " + ev.title
   }
 
   // ---- rattachement des copies (matching folder contents to students) ----
@@ -1764,7 +1937,7 @@ Item {
     correctionPromptFile.setText(prompt)
 
     correctionProc.workingDirectory = ctx.runDir
-    correctionProc.command = ClaudeRunner.buildFileCommand(prompt)
+    correctionProc.command = ClaudeRunner.buildFileCommand(prompt, root.correctionRunAgentOpts())
     correctionProc.running = false
     correctionProc.running = true
   }
@@ -2109,7 +2282,7 @@ Item {
     correctionPromptFile.path = ctx.runDir + "/prompt.txt"
     correctionPromptFile.setText(prompt)
 
-    questionnaireFillProc.command = ClaudeRunner.buildCheckCommand(prompt)
+    questionnaireFillProc.command = ClaudeRunner.buildCheckCommand(prompt, root.correctionRunAgentOpts())
     questionnaireFillProc.running = false
     questionnaireFillProc.running = true
   }
@@ -2590,14 +2763,20 @@ Item {
     root._competencyAppreciationOnly = false
     root._competencyAddendum = ""
     root._competencyAppreciationLength = "moyenne"
+    root._competencyBullets = null
+    root._competencyConclusion = ""
+    root._competencyDoubts = ({})
+    root._competencyMaxBullets = CommentGuidePromptBuilder.DEFAULT_MAX_BULLETS
+    var studentEntry = CorrectionsStore.studentEntry(ev, ctx.studentId)
     var prompt = CompetencyPromptBuilder.buildFillGridPrompt({
+      guided: !!grid.bullets, tiersTemps: !!studentEntry.tiersTempsAmenage,
       copyPath: ctx.anonymizedCopyPath,
       writingMode: writingMode,
       sujetPath: ev.sujetPath, corrigePath: ev.corrigePath,
       niveauClasse: ev.niveauClasse, bienveillance: ev.bienveillance, complements: ev.complements,
       gridRubricText: CompetencyGrids.buildGridRubricText(grid), rows: grid.rows
     })
-    competencyFillProc.command = ClaudeRunner.buildCheckCommand(prompt)
+    competencyFillProc.command = ClaudeRunner.buildCheckCommand(prompt, root.correctionRunAgentOpts())
     competencyFillProc.running = false
     competencyFillProc.running = true
   }
@@ -2615,17 +2794,60 @@ Item {
       root._competencyChecks = parsed.checks
       root._competencyJustifications = parsed.justifications
       root._competencyLog = parsed.log
+      root._competencyConclusion = parsed.conclusion || ""
+      root._competencyDoubts = parsed.doubts || {}
       root.startCompetencyAppreciation()
     }
   }
 
+  // "Commentaire guidé" grids (grid.bullets): step 2 writes bullet comments
+  // (from the Eval. Compétences bank + new ones) and a short commentaire
+  // personnel instead of the 3-paragraph appreciation — see
+  // CommentGuidePromptBuilder.js. null = this run produces no bullets.
+  property var _competencyBullets: null
+  property string _competencyConclusion: ""
+  property var _competencyDoubts: ({})
+  property int _competencyMaxBullets: 0
+
   function startCompetencyAppreciation() {
     var grid = root._competencyGrid
     if (!grid) { root.finalizeCorrectionError("Grille perdue en cours de correction."); return }
+    if (grid.bullets) { root.startCommentBullets(); return }
+    root._competencyBullets = null
     var prompt = PromptBuilder.buildEvalAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, root._competencyChecks, "", root._competencyAddendum, root._competencyJustifications, root._competencyAppreciationLength)
-    competencyAppreciationProc.command = ClaudeRunner.buildCommand(prompt)
+    competencyAppreciationProc.command = ClaudeRunner.buildCommand(prompt, root.correctionRunAgentOpts())
     competencyAppreciationProc.running = false
     competencyAppreciationProc.running = true
+  }
+
+  function startCommentBullets() {
+    var grid = root._competencyGrid
+    var prompt = CommentGuidePromptBuilder.buildBulletsPrompt({
+      gridName: grid.name, rows: grid.rows,
+      checks: root._competencyChecks, justifications: root._competencyJustifications,
+      maxBullets: root._competencyMaxBullets, categories: grid.categories,
+      conclusionLine: root._competencyConclusion, addendum: root._competencyAddendum
+    })
+    competencyBulletsProc.command = ClaudeRunner.buildCommand(prompt, root.correctionRunAgentOpts())
+    competencyBulletsProc.running = false
+    competencyBulletsProc.running = true
+  }
+
+  Process {
+    id: competencyBulletsProc
+    stdout: StdioCollector { id: competencyBulletsOut; waitForEnd: true }
+    stderr: StdioCollector { id: competencyBulletsErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.finalizeCorrectionError((competencyBulletsErr.text || "Échec de la génération des commentaires.").slice(0, 500))
+        return
+      }
+      var parsed = CommentGuidePromptBuilder.parseBullets(competencyBulletsOut.text || "", root._competencyMaxBullets, root._competencyGrid.categories)
+      root._competencyBullets = parsed.bullets
+      root._competencyAppreciation = parsed.personal
+      if (root._competencyAppreciationOnly) root.finalizeCompetencyAppreciationOnly()
+      else root.finalizeCompetencyFullRun()
+    }
   }
 
   Process {
@@ -2661,6 +2883,9 @@ Item {
       competencyChecks: root._competencyChecks,
       competencyJustifications: root._competencyJustifications,
       appreciation: root._competencyAppreciation,
+      commentBullets: root._competencyBullets !== null ? root._competencyBullets : undefined,
+      conclusionNote: root._competencyBullets !== null ? root._competencyConclusion : undefined,
+      competencyDoubts: root._competencyDoubts,
       log: needsReview ? logTrim : "",
       needsReview: needsReview,
       error: "",
@@ -2682,6 +2907,7 @@ Item {
     root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, {
       status: "done",
       appreciation: root._competencyAppreciation,
+      commentBullets: root._competencyBullets !== null ? root._competencyBullets : undefined,
       addendum: ""
     })
     root._correctionRunContext = null
@@ -2758,7 +2984,10 @@ Item {
     var checks = {}
     for (var k in entry.competencyChecks) checks[k] = entry.competencyChecks[k]
     checks[String(rowIndex)] = colIndex
-    root.setCorrectionStudentPatch(classId, root.competencyGridPopoverStudentId, { competencyChecks: checks })
+    // Picking a cell by hand settles the agent's hesitation on that row.
+    var doubts = {}
+    for (var d in entry.competencyDoubts) if (d !== String(rowIndex)) doubts[d] = true
+    root.setCorrectionStudentPatch(classId, root.competencyGridPopoverStudentId, { competencyChecks: checks, competencyDoubts: doubts })
   }
 
   // ---- weights popover (creation AND on an existing évaluation) ----------
@@ -2845,10 +3074,94 @@ Item {
     root._competencyChecks = entry.competencyChecks
     root._competencyJustifications = entry.competencyJustifications
     root._competencyLog = entry.log
+    root._competencyConclusion = entry.conclusionNote
+    root._competencyMaxBullets = CommentGuidePromptBuilder.DEFAULT_MAX_BULLETS
     root._competencyAppreciationOnly = true
     root._competencyAddendum = String(addendumText || "").trim()
     root._competencyAppreciationLength = lengthOption || "moyenne"
     root.startCompetencyAppreciation()
+  }
+
+  // Re-runs the bullet comments ONLY for a "Commentaire guidé" student, from
+  // the grid as it currently stands (never re-reads the copy). maxBullets
+  // lets Gabriel raise the 8-bullet ceiling during a correction session
+  // (Gabriel, 2026-10-15) — the agent still writes only as many as needed.
+  function requestRegenerateCommentBullets(studentId, maxBullets) {
+    if (root.correctionRunningStudentId !== "") return
+    var classId = root.currentCorrectionsClassId()
+    var ev = root.activeEvaluation()
+    if (!classId || !ev || !ev.gridId || !studentId) return
+    var grid = CompetencyGrids.findGrid(ev.gridId)
+    if (!grid || !grid.bullets) return
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    root.correctionRunningStudentId = studentId
+    root.setCorrectionStudentPatch(classId, studentId, { status: "running", error: "" })
+    root._correctionRunContext = { classId: classId, studentId: studentId }
+    root._competencyGrid = grid
+    root._competencyChecks = entry.competencyChecks
+    root._competencyJustifications = entry.competencyJustifications
+    root._competencyLog = entry.log
+    root._competencyConclusion = entry.conclusionNote
+    root._competencyMaxBullets = maxBullets || CommentGuidePromptBuilder.DEFAULT_MAX_BULLETS
+    root._competencyAppreciationOnly = true
+    root._competencyAddendum = ""
+    root.startCommentBullets()
+  }
+
+  function evaluationUsesBullets(ev) {
+    var g = (ev && ev.gridId) ? CompetencyGrids.findGrid(ev.gridId) : null
+    return !!(g && g.bullets)
+  }
+
+  function commentBulletsCopyText(entry) {
+    var out = (entry.commentBullets || []).map(function(b) { return "- " + b.text })
+    if (entry.appreciation) out.push("", entry.appreciation)
+    return out.join("\n")
+  }
+
+  function removeCommentBullet(studentId, bulletId) {
+    var ev = root.activeEvaluation()
+    if (!ev) return
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    root.setCorrectionStudentPatch(root.currentCorrectionsClassId(), studentId, {
+      commentBullets: entry.commentBullets.filter(function(b) { return b.id !== bulletId })
+    })
+  }
+
+  // Validates an agent-written bullet: saves it to the shared comments bank
+  // and marks it as no longer "new" on this copy.
+  function validateCommentBullet(studentId, bulletId) {
+    var ev = root.activeEvaluation()
+    if (!ev) return
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    var updated = entry.commentBullets.map(function(b) {
+      if (b.id !== bulletId) return b
+      root.upsertEvalCommentToBank(b.text, b.tag || "Divers")
+      return { id: b.id, text: b.text, tag: b.tag, bankId: b.bankId, isNew: false }
+    })
+    root.setCorrectionStudentPatch(root.currentCorrectionsClassId(), studentId, { commentBullets: updated })
+  }
+
+  // Manual bullet typed in the Compétences popover (same "Commentaires"
+  // UX as Eval. Compétences). isNew = not in the comments bank yet, which is
+  // what shows its "＋ Banque" button.
+  function addCorrectionCommentBullet(studentId, text) {
+    var t = String(text || "").trim()
+    var ev = root.activeEvaluation()
+    if (!t || !ev || !studentId) return
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    root.setCorrectionStudentPatch(root.currentCorrectionsClassId(), studentId, {
+      commentBullets: entry.commentBullets.concat([{ id: CommentsBankStore.makeId(), text: t, tag: "", bankId: "", isNew: true }])
+    })
+  }
+
+  // "📚 Insérer depuis la banque" from the Compétences popover: the shared
+  // comment-bank overlay, but its pick lands on the correction's bullets
+  // instead of Eval. Compétences' comments (commentBankTarget routes it).
+  property string commentBankTarget: "eval"
+  function openCorrectionCommentBank() {
+    root.commentBankTarget = "correction"
+    root.evalCommentBankPopoverOpen = true
   }
 
   // ---- Compétences popover: PDF export (Gabriel, 2026-09-27) -------------
@@ -2896,7 +3209,9 @@ Item {
       includeJustifications: root.competencyExportIncludeJustifications,
       // Gabriel, 2026-09-27: note en gras à la fin du paragraphe
       // d'appréciation, plus de section séparée — voir buildTypstSource().
-      inlineNote: true
+      inlineNote: true,
+      comments: root.evaluationUsesBullets(ev) ? entry.commentBullets : [],
+      bulletsMode: root.evaluationUsesBullets(ev)
     }
     return CompetencyGrids.buildTypstSource(Store.studentLabel(student), cls.name, grid, payload, ev.title)
   }
@@ -3920,9 +4235,21 @@ Item {
   property bool evalCommentBankPopoverOpen: false
 
   function openEvalCommentBankPopover() { root.evalCommentBankPopoverOpen = true }
-  function cancelEvalCommentBankPopover() { root.evalCommentBankPopoverOpen = false }
+  function cancelEvalCommentBankPopover() { root.evalCommentBankPopoverOpen = false; root.commentBankTarget = "eval" }
   function insertEvalCommentFromBank(entry) {
-    root._addEvalCommentText(entry.text, entry.tag)
+    if (root.commentBankTarget === "correction") {
+      var ev = root.activeEvaluation()
+      var sid = root.competencyGridPopoverStudentId
+      if (ev && sid) {
+        var cur = CorrectionsStore.studentEntry(ev, sid)
+        root.setCorrectionStudentPatch(root.currentCorrectionsClassId(), sid, {
+          commentBullets: cur.commentBullets.concat([{ id: CommentsBankStore.makeId(), text: entry.text, tag: entry.tag, bankId: entry.id, isNew: false }])
+        })
+      }
+      root.commentBankTarget = "eval"
+    } else {
+      root._addEvalCommentText(entry.text, entry.tag)
+    }
     root.evalCommentBankPopoverOpen = false
   }
 
@@ -4403,7 +4730,7 @@ Item {
           || evaluationCommentDraftField.activeFocus
           || root.classSettingsOpen || root.incompatOpen || root.pathBarMode !== ""
           || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen || root.syncSettingsOpen
-          || root.correctionReplaceConfirmOpen
+          || root.correctionReplaceConfirmOpen || root.archivesPopoverOpen
           || root.correctionConsignesOverwriteConfirmOpen
           || root.correctionWritingPopoverOpen
           || root.correctionLogPopoverStudentId !== ""
@@ -6293,6 +6620,93 @@ Item {
                     }
                   }
 
+                  // Modèle et effort de l'agent (Gabriel, 2026-10-15) — hors du
+                  // wizard de création : modifiables à tout moment, par
+                  // évaluation, et pris en compte à la prochaine correction.
+                  Row {
+                    visible: !!root.activeEvaluation()
+                    spacing: Style.spacing.controlGap
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Modèle"
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Dropdown {
+                      width: Style.space(200)
+                      options: [
+                        { value: "", label: "Par défaut (config. Claude)" },
+                        { value: "sonnet", label: "Sonnet" },
+                        { value: "opus", label: "Opus" }
+                      ]
+                      value: root.activeEvaluation() ? (root.activeEvaluation().agentModel || "") : ""
+                      foreground: root.foreground
+                      background: root.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onChanged: function(v) { root.setEvaluationAgentOptions(v, root.activeEvaluation() ? root.activeEvaluation().agentEffort : "") }
+                    }
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: "Effort"
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                    Dropdown {
+                      width: Style.space(200)
+                      options: [
+                        { value: "", label: "Par défaut" },
+                        { value: "low", label: "Faible" },
+                        { value: "medium", label: "Moyen" },
+                        { value: "high", label: "Élevé" },
+                        { value: "xhigh", label: "Très élevé" },
+                        { value: "max", label: "Maximum" }
+                      ]
+                      value: root.activeEvaluation() ? (root.activeEvaluation().agentEffort || "") : ""
+                      foreground: root.foreground
+                      background: root.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onChanged: function(v) { root.setEvaluationAgentOptions(root.activeEvaluation() ? root.activeEvaluation().agentModel : "", v) }
+                    }
+                  }
+
+                  // Archives (Gabriel, 2026-10-15) : garder un paquet avant de
+                  // le remplacer — voir lib/ArchiveStore.js.
+                  Row {
+                    visible: !!root.activeEvaluation()
+                    spacing: Style.spacing.controlGap
+
+                    Button {
+                      text: "📦 Archiver l'évaluation"
+                      bordered: true
+                      enabled: !root._archiveInFlight
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.startArchive("manual")
+                    }
+                    Button {
+                      text: "🗂 Archives"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.openArchivesPopover()
+                    }
+                  }
+                  Text {
+                    visible: root.archiveFeedback !== "" && !root.archivesPopoverOpen
+                    width: parent.width
+                    text: root.archiveFeedback
+                    color: Qt.darker(root.foreground, 1.3)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                  }
+
                   // Exports de classe du pipeline questionnaire (Gabriel,
                   // 2026-10-13). Ligne à part plutôt que dans l'en-tête
                   // ci-dessus : cette Row est ancrée à droite et ne se
@@ -6377,6 +6791,7 @@ Item {
                             : correctionRow.entry.status === "running" ? "Correction en cours…"
                             : correctionRow.entry.status === "error" ? ("Échec : " + correctionRow.entry.error)
                             : (correctionRow.usesQuestionnaire && correctionRow.entry.status === "done") ? root.questionnaireTallyLabel(correctionRow.modelData.id)
+                            : (correctionRow.usesBullets && correctionRow.entry.status === "done") ? (correctionRow.entry.commentBullets.length + " commentaire(s) — voir « Compétences ».")
                             : correctionRow.entry.appreciation !== "" ? correctionRow.entry.appreciation
                             : correctionRow.entry.copyPath !== "" ? "Copie rattachée, pas encore corrigée."
                             : "Copie non rattachée."
@@ -6387,7 +6802,40 @@ Item {
                           textFormat: Text.PlainText
                         }
 
+                        // Criteria where the agent said it hesitated between two
+                        // paliers (Gabriel, 2026-10-15) — a warning to look at
+                        // them first; cleared per criterion once he picks a cell.
+                        readonly property int doubtCount: Object.keys(entry.competencyDoubts || {}).length
+                        Text {
+                          visible: !correctionRow.entry.excluded && correctionRow.entry.status === "done" && correctionRow.doubtCount > 0
+                          width: parent.width
+                          text: "⚠ " + correctionRow.doubtCount + (correctionRow.doubtCount > 1 ? " critères où l'agent a hésité" : " critère où l'agent a hésité") + " — à trancher dans « Compétences »."
+                          color: "#c98a3a"
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          font.bold: true
+                          wrapMode: Text.WordWrap
+                        }
+
                         readonly property bool usesGrid: !!(root.activeEvaluation() && root.activeEvaluation().gridId)
+                        readonly property bool usesBullets: root.evaluationUsesBullets(root.activeEvaluation())
+
+                        // "Commentaire guidé": 1/3-temps aménagement, ticked
+                        // BEFORE launching the correction (Gabriel,
+                        // 2026-10-15) — sous-partie II-b not required.
+                        // Unrelated to the questionnaire's margin
+                        // compensation button further down.
+                        Toggle {
+                          visible: correctionRow.usesBullets && !correctionRow.entry.excluded
+                          width: parent.width
+                          label: "1/3 temps"
+                          description: "Sous-partie II-b non exigée pour cet élève."
+                          checked: correctionRow.entry.tiersTempsAmenage
+                          foreground: root.foreground
+                          accent: root.accent
+                          fontFamily: root.fontFamily
+                          onClicked: root.setCorrectionStudentPatch(root.currentCorrectionsClassId(), correctionRow.modelData.id, { tiersTempsAmenage: !correctionRow.entry.tiersTempsAmenage })
+                        }
 
                         ButtonGroup {
                           visible: !correctionRow.entry.excluded && correctionRow.entry.status === "done" && !correctionRow.usesGrid && !correctionRow.usesQuestionnaire
@@ -6440,7 +6888,7 @@ Item {
                             visible: !correctionRow.entry.excluded
                             text: correctionRow.queued ? "⏳ En file d'attente"
                               : correctionRow.entry.status === "running" ? "⏳ En cours…"
-                              : correctionRow.entry.appreciation !== "" ? "🔁 Recorriger"
+                              : (correctionRow.entry.appreciation !== "" || (correctionRow.usesBullets && correctionRow.entry.status === "done")) ? "🔁 Recorriger"
                               : "🚀 Corriger"
                             bordered: true
                             enabled: correctionRow.entry.copyPath !== "" && correctionRow.entry.status !== "running" && !correctionRow.queued
@@ -6478,10 +6926,10 @@ Item {
                               visible: !correctionRow.usesQuestionnaire
                               text: "📋 Copier le code"
                               bordered: true
-                              enabled: correctionRow.entry.appreciation !== ""
+                              enabled: correctionRow.entry.appreciation !== "" || correctionRow.entry.commentBullets.length > 0
                               foreground: root.foreground
                               accent: root.accent
-                              onClicked: root.copyCorrectionAppreciation(correctionRow.entry.appreciation)
+                              onClicked: root.copyCorrectionAppreciation(correctionRow.usesBullets ? root.commentBulletsCopyText(correctionRow.entry) : correctionRow.entry.appreciation)
                             }
 
                             Rectangle {
@@ -7515,6 +7963,19 @@ Item {
       }
 
 
+      ArchivesPopover {
+        anchors.fill: parent
+        opened: root.archivesPopoverOpen
+        entries: root.archiveEntries
+        feedback: root.archiveFeedback
+        foreground: root.foreground
+        background: root.background
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onRestoreRequested: function(file) { root.requestRestoreArchive(file) }
+        onCanceled: root.closeArchivesPopover()
+      }
+
       WritingModePopover {
         anchors.fill: parent
         opened: root.correctionWritingPopoverOpen
@@ -7565,7 +8026,10 @@ Item {
         grid: root.competencyGridPopoverGrid()
         checks: root.competencyGridPopoverEntry().competencyChecks
         justifications: root.competencyGridPopoverEntry().competencyJustifications
+        doubts: root.competencyGridPopoverEntry().competencyDoubts
         appreciation: root.competencyGridPopoverEntry().appreciation
+        bulletsMode: root.evaluationUsesBullets(root.activeEvaluation())
+        bullets: root.competencyGridPopoverEntry().commentBullets
         note: root.competencyEffectiveNote(root.competencyGridPopoverStudentId).severe
         liveNote: root.competencyLiveNote(root.competencyGridPopoverStudentId).severe
         hasNoteOverride: root.competencyGridPopoverEntry().noteSevere !== "" || root.competencyGridPopoverEntry().noteBienveillante !== ""
@@ -7580,6 +8044,11 @@ Item {
         onAppreciationSaved: function(text) { root.saveCompetencyAppreciation(root.competencyGridPopoverStudentId, text) }
         onNoteSaved: function(note) { root.saveCompetencyNote(root.competencyGridPopoverStudentId, note) }
         onRegenerateRequested: function(addendum, length) { root.requestRegenerateCompetencyAppreciation(root.competencyGridPopoverStudentId, addendum, length) }
+        onBulletAdded: function(text) { root.addCorrectionCommentBullet(root.competencyGridPopoverStudentId, text) }
+        onBulletRemoved: function(id) { root.removeCommentBullet(root.competencyGridPopoverStudentId, id) }
+        onBulletBanked: function(id) { root.validateCommentBullet(root.competencyGridPopoverStudentId, id) }
+        onBankInsertRequested: root.openCorrectionCommentBank()
+        onBulletsRegenerateRequested: function(cap) { root.requestRegenerateCommentBullets(root.competencyGridPopoverStudentId, cap) }
         onResetNoteOverrideRequested: root.resetCompetencyNoteOverride(root.competencyGridPopoverStudentId)
         onCopyOpenRequested: root.openCompetencyGridCopy()
         onExportRequested: function(includeJustifications) { root.requestExportCompetencyPdf(root.competencyGridPopoverStudentId, includeJustifications) }
@@ -7719,7 +8188,7 @@ Item {
       ConfirmDialog {
         anchors.fill: parent
         opened: root.correctionReplaceConfirmOpen
-        message: "Remplacer l'évaluation en cours pour cette classe par une nouvelle ? Le tableau actuel (copies rattachées, corrections générées) sera définitivement perdu."
+        message: "Remplacer l'évaluation en cours pour cette classe par une nouvelle ? Elle sera d'abord archivée dans Dropbox (Correction automatique/archives), d'où tu pourras la restaurer. Si l'archivage échoue, rien n'est remplacé."
         cancelText: "Annuler"
         confirmText: "Remplacer"
         selectedIndex: 0

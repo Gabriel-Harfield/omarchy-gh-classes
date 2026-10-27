@@ -12,6 +12,9 @@ Item {
   id: root
 
   property bool opened: false
+  // Popover zoom (shared, persisted by Panel.qml).
+  property real zoom: 1.0
+  signal zoomChangeRequested(real zoom)
   property var classes: []
   property bool importing: false
   property string importError: ""
@@ -58,126 +61,170 @@ Item {
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-        Column {
-          width: card.width - card.contentLeftInset - card.contentRightInset
-          spacing: Style.spacing.huge
-
-          Text {
-            text: "Paramètres — Classes"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-          }
+        // Gabriel, 2026-10-21: popover-local zoom (the panel-wide one does not
+        // reach popovers) — same scale-transform trick as Panel.qml's
+        // zoomWrapper; the wrapper reports the REAL scaled size to the ScrollView.
+        Item {
+          id: zoomWrapper
+          width: zoomColumn.width * root.zoom
+          height: zoomColumn.height * root.zoom
+          implicitWidth: width
+          implicitHeight: height
 
           Column {
-            width: parent.width
-            spacing: Style.spacing.sm
-            visible: root.classes.length > 0
+            id: zoomColumn
+            width: (card.width - card.contentLeftInset - card.contentRightInset) / root.zoom
+            scale: root.zoom
+            transformOrigin: Item.TopLeft
+            spacing: Style.spacing.huge
 
-            Repeater {
-              model: root.classes
-              delegate: Item {
-                required property var modelData
-                width: parent.width
-                height: Math.max(classNameText.implicitHeight, deleteBtn.implicitHeight)
+            Row {
+              layoutDirection: Qt.RightToLeft
+              width: parent.width
+              spacing: Style.spacing.xs
 
-                Text {
-                  id: classNameText
-                  anchors.left: parent.left
-                  anchors.right: deleteBtn.left
-                  anchors.rightMargin: Style.spacing.controlGap
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: modelData.name + "  ·  " + modelData.students.length + " élève" + (modelData.students.length > 1 ? "s" : "")
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  elide: Text.ElideRight
-                  textFormat: Text.PlainText
-                }
-
-                Button {
-                  id: deleteBtn
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Supprimer"
-                  bordered: true
-                  foreground: root.foreground
-                  accent: Color.urgent
-                  onClicked: root.deleteRequested(modelData.id)
-                }
+              Button {
+                text: "+"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom + 0.1)
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(44)
+                horizontalAlignment: Text.AlignHCenter
+                text: Math.round(root.zoom * 100) + "%"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Button {
+                text: "−"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom - 0.1)
               }
             }
-          }
-
-          Text {
-            visible: root.classes.length === 0
-            text: "Aucune classe pour le moment."
-            color: Qt.darker(root.foreground, 1.5)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-
-          PanelSeparator { foreground: root.foreground; width: parent.width }
-
-          Column {
-            width: parent.width
-            spacing: Style.spacing.sm
 
             Text {
-              text: "Créer une nouvelle classe"
+              text: "Paramètres — Classes"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               font.bold: true
             }
 
-            TextField {
-              id: nameField
+            Column {
               width: parent.width
-              placeholderText: "Nom de la classe (ex. 2nde 4)"
-              foreground: root.foreground
-              accent: root.accent
-              maximumLength: 120
-            }
+              spacing: Style.spacing.sm
+              visible: root.classes.length > 0
 
-            TextField {
-              id: pathField
-              width: parent.width
-              placeholderText: "Chemin du fichier .md (une ligne par élève : NOM Prénom)"
-              foreground: root.foreground
-              accent: root.accent
-              maximumLength: 2000
+              Repeater {
+                model: root.classes
+                delegate: Item {
+                  required property var modelData
+                  width: parent.width
+                  height: Math.max(classNameText.implicitHeight, deleteBtn.implicitHeight)
+
+                  Text {
+                    id: classNameText
+                    anchors.left: parent.left
+                    anchors.right: deleteBtn.left
+                    anchors.rightMargin: Style.spacing.controlGap
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: modelData.name + "  ·  " + modelData.students.length + " élève" + (modelData.students.length > 1 ? "s" : "")
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                    textFormat: Text.PlainText
+                  }
+
+                  Button {
+                    id: deleteBtn
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Supprimer"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: Color.urgent
+                    onClicked: root.deleteRequested(modelData.id)
+                  }
+                }
+              }
             }
 
             Text {
-              visible: root.importError !== ""
-              width: parent.width
-              text: root.importError
-              color: Color.urgent
+              visible: root.classes.length === 0
+              text: "Aucune classe pour le moment."
+              color: Qt.darker(root.foreground, 1.5)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-              textFormat: Text.PlainText
             }
 
-            Row {
-              spacing: Style.spacing.controlGap
+            PanelSeparator { foreground: root.foreground; width: parent.width }
 
-              Button {
-                text: root.importing ? "Import en cours…" : "Créer"
-                bordered: true
-                enabled: !root.importing
-                foreground: root.foreground
-                accent: root.accent
-                onClicked: root.createRequested(nameField.text, pathField.text)
+            Column {
+              width: parent.width
+              spacing: Style.spacing.sm
+
+              Text {
+                text: "Créer une nouvelle classe"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
               }
-              Button {
-                text: "Fermer"
-                bordered: true
+
+              TextField {
+                id: nameField
+                width: parent.width
+                placeholderText: "Nom de la classe (ex. 2nde 4)"
                 foreground: root.foreground
                 accent: root.accent
-                onClicked: root.canceled()
+                maximumLength: 120
+              }
+
+              TextField {
+                id: pathField
+                width: parent.width
+                placeholderText: "Chemin du fichier .md (une ligne par élève : NOM Prénom)"
+                foreground: root.foreground
+                accent: root.accent
+                maximumLength: 2000
+              }
+
+              Text {
+                visible: root.importError !== ""
+                width: parent.width
+                text: root.importError
+                color: Color.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+              }
+
+              Row {
+                spacing: Style.spacing.controlGap
+
+                Button {
+                  text: root.importing ? "Import en cours…" : "Créer"
+                  bordered: true
+                  enabled: !root.importing
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.createRequested(nameField.text, pathField.text)
+                }
+                Button {
+                  text: "Fermer"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.canceled()
+                }
               }
             }
           }

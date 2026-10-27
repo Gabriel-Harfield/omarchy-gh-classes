@@ -18,6 +18,9 @@ Item {
   id: root
 
   property bool opened: false
+  // Popover zoom (shared, persisted by Panel.qml).
+  property real zoom: 1.0
+  signal zoomChangeRequested(real zoom)
   property var grid: null // CompetencyGrids grid object ({ id, name, rows })
   property var weights: ({}) // { "<rowIndex>": points (0-10) }
   property int total: 20 // évaluation's barème (5, 10, 15 or 20) — Gabriel, 2026-10-01
@@ -70,112 +73,156 @@ Item {
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-        Column {
-          width: card.width - card.contentLeftInset - card.contentRightInset
-          spacing: Style.spacing.lg
+        // Gabriel, 2026-10-21: popover-local zoom (the panel-wide one does not
+        // reach popovers) — same scale-transform trick as Panel.qml's
+        // zoomWrapper; the wrapper reports the REAL scaled size to the ScrollView.
+        Item {
+          id: zoomWrapper
+          width: zoomColumn.width * root.zoom
+          height: zoomColumn.height * root.zoom
+          implicitWidth: width
+          implicitHeight: height
 
-          Text {
-            text: "Répartir les points par critère"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            wrapMode: Text.WordWrap
-            width: parent.width
-            textFormat: Text.PlainText
-          }
+          Column {
+            id: zoomColumn
+            width: (card.width - card.contentLeftInset - card.contentRightInset) / root.zoom
+            scale: root.zoom
+            transformOrigin: Item.TopLeft
+            spacing: Style.spacing.lg
 
-          Text {
-            width: parent.width
-            text: "Chaque critère vaut le nombre de points que vous lui donnez ici, sur un total de " + root.total + ". Idéalement, répartissez exactement " + root.total + " points au total. Un critère gagne : Maîtrisé = tous ses points, En cours de maîtrise = 2/3, Insuffisamment maîtrisé = 1/3, Non maîtrisé = 0. La note finale est la somme de ce que chaque critère rapporte."
-            color: Qt.darker(root.foreground, 1.4)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            text: "Total distribué : " + CompetencyGrids.formatNote(root.totalDistributed()) + " / " + root.total
-            color: root.totalDistributed() === root.total ? root.accent : Qt.darker(root.foreground, 1.3)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-            font.bold: true
-          }
-
-          Text {
-            visible: !root.grid
-            text: "Aucune grille associée à cette évaluation."
-            color: Qt.darker(root.foreground, 1.5)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-          }
-
-          Repeater {
-            model: root.grid ? root.grid.rows : []
-            delegate: Row {
-              required property var modelData
-              required property int index
-              visible: modelData.checkable
+            Row {
+              layoutDirection: Qt.RightToLeft
               width: parent.width
-              spacing: Style.spacing.controlGap
-
-              Text {
-                width: parent.width - Style.space(140)
-                anchors.verticalCenter: parent.verticalCenter
-                text: modelData.text
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                wrapMode: Text.WordWrap
-                textFormat: Text.PlainText
-              }
-
-              Button {
-                text: "−"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                enabled: root.weightFor(index) > 0
-                onClicked: root.weightChanged(index, root.weightFor(index) - 0.5)
-              }
-
-              Text {
-                width: Style.space(36)
-                horizontalAlignment: Text.AlignHCenter
-                anchors.verticalCenter: parent.verticalCenter
-                text: CompetencyGrids.formatNote(root.weightFor(index))
-                font.bold: true
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
+              spacing: Style.spacing.xs
 
               Button {
                 text: "+"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                enabled: root.weightFor(index) < root.total
-                onClicked: root.weightChanged(index, root.weightFor(index) + 0.5)
+                onClicked: root.zoomChangeRequested(root.zoom + 0.1)
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(44)
+                horizontalAlignment: Text.AlignHCenter
+                text: Math.round(root.zoom * 100) + "%"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Button {
+                text: "−"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom - 0.1)
               }
             }
-          }
 
-          Row {
-            spacing: Style.spacing.controlGap
-            Button {
-              text: "🔄 Réinitialiser les points"
-              bordered: true
-              foreground: root.foreground
-              accent: Color.urgent
-              onClicked: root.resetRequested()
+            Text {
+              text: "Répartir les points par critère"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+              wrapMode: Text.WordWrap
+              width: parent.width
+              textFormat: Text.PlainText
             }
-            Button {
-              text: "Fermer"
-              bordered: true
-              foreground: root.foreground
-              accent: root.accent
-              onClicked: root.canceled()
+
+            Text {
+              width: parent.width
+              text: "Chaque critère vaut le nombre de points que vous lui donnez ici, sur un total de " + root.total + ". Idéalement, répartissez exactement " + root.total + " points au total. Un critère gagne : Maîtrisé = tous ses points, En cours de maîtrise = 2/3, Insuffisamment maîtrisé = 1/3, Non maîtrisé = 0. La note finale est la somme de ce que chaque critère rapporte."
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              text: "Total distribué : " + CompetencyGrids.formatNote(root.totalDistributed()) + " / " + root.total
+              color: root.totalDistributed() === root.total ? root.accent : Qt.darker(root.foreground, 1.3)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+            }
+
+            Text {
+              visible: !root.grid
+              text: "Aucune grille associée à cette évaluation."
+              color: Qt.darker(root.foreground, 1.5)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Repeater {
+              model: root.grid ? root.grid.rows : []
+              delegate: Row {
+                required property var modelData
+                required property int index
+                visible: modelData.checkable
+                width: parent.width
+                spacing: Style.spacing.controlGap
+
+                Text {
+                  width: parent.width - Style.space(140)
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: modelData.text
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                  textFormat: Text.PlainText
+                }
+
+                Button {
+                  text: "−"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  enabled: root.weightFor(index) > 0
+                  onClicked: root.weightChanged(index, root.weightFor(index) - 0.5)
+                }
+
+                Text {
+                  width: Style.space(36)
+                  horizontalAlignment: Text.AlignHCenter
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: CompetencyGrids.formatNote(root.weightFor(index))
+                  font.bold: true
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+
+                Button {
+                  text: "+"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  enabled: root.weightFor(index) < root.total
+                  onClicked: root.weightChanged(index, root.weightFor(index) + 0.5)
+                }
+              }
+            }
+
+            Row {
+              spacing: Style.spacing.controlGap
+              Button {
+                text: "🔄 Réinitialiser les points"
+                bordered: true
+                foreground: root.foreground
+                accent: Color.urgent
+                onClicked: root.resetRequested()
+              }
+              Button {
+                text: "Fermer"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.canceled()
+              }
             }
           }
         }

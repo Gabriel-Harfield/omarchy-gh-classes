@@ -26,6 +26,7 @@ import "lib/EvalTemplatesStore.js" as EvalTemplatesStore
 import "lib/CommentsBankStore.js" as CommentsBankStore
 import "lib/QuestionnaireGrid.js" as QuestionnaireGrid
 import "lib/QuestionnairePromptBuilder.js" as QuestionnairePromptBuilder
+import "lib/ClassReport.js" as ClassReport
 import "ui"
 
 // GH Classes: one tab per class, weighted-random draw, group generation
@@ -207,6 +208,27 @@ Item {
     if (root.syncDir) root.runSync()
   }
 
+  // "Modifier" in the bank popover: rewrites the text in place (same id and
+  // tag). The OLD text is tombstoned so a sync can't re-import it from
+  // another machine's bank as a second entry.
+  function editEvalCommentsBankEntry(id, newText) {
+    var target = null
+    for (var i = 0; i < root.evalCommentsBank.length; i++) {
+      if (root.evalCommentsBank[i].id === id) { target = root.evalCommentsBank[i]; break }
+    }
+    if (!target) return
+    var next = CommentsBankStore.updateEntryText(root.evalCommentsBank, id, newText)
+    var changed = false
+    for (var j = 0; j < next.length; j++) if (next[j].id === id && next[j].text !== target.text) changed = true
+    if (!changed) return
+    root.evalCommentsBank = next
+    root.persistEvalCommentsBank()
+    root.evalCommentsBankDeletedKeys = CommentsBankStore.sanitizeTombstones(
+      root.evalCommentsBankDeletedKeys.concat([CommentsBankStore.entryKey(target.text, target.tag)]))
+    root.persistEvalCommentsTombstones()
+    if (root.syncDir) root.runSync()
+  }
+
   function deleteEvalCommentsBankEntry(id) {
     var target = null
     for (var i = 0; i < root.evalCommentsBank.length; i++) {
@@ -231,6 +253,9 @@ Item {
   // pane; for when he wants bigger text/controls without touching the
   // whole desktop's scale. See setUiZoom() and the zoomWrapper Item below.
   property real uiZoom: 1.0
+  // Zoom shared by every popover (the panel zoom does not reach them);
+  // persisted in settings.json.
+  property real popoverZoom: 1.0
   // agent.md's path — global now, set once here rather than re-pointed at
   // for every évaluation (Gabriel, 2026-10-03). Local-only, like syncDir:
   // never synced (it's a filesystem path, meaningless on another machine).
@@ -247,11 +272,12 @@ Item {
       root.activeClassId = s.activeClassId
       root.syncDir = s.syncDir
       root.uiZoom = s.uiZoom
+      root.popoverZoom = s.popoverZoom
       root.agentPath = s.agentPath
       root.seedDefaultAgentPathIfEmpty()
     }
     onLoadFailed: {
-      root.activeClassId = ""; root.syncDir = ""; root.uiZoom = 1.0; root.agentPath = ""
+      root.activeClassId = ""; root.syncDir = ""; root.uiZoom = 1.0; root.popoverZoom = 1.0; root.agentPath = ""
       root.seedDefaultAgentPathIfEmpty()
     }
   }
@@ -268,7 +294,7 @@ Item {
   }
 
   function persistSettings() {
-    settingsFile.setText(Store.serializeSettings({ activeClassId: root.activeClassId, syncDir: root.syncDir, uiZoom: root.uiZoom, agentPath: root.agentPath }))
+    settingsFile.setText(Store.serializeSettings({ activeClassId: root.activeClassId, syncDir: root.syncDir, uiZoom: root.uiZoom, popoverZoom: root.popoverZoom, agentPath: root.agentPath }))
   }
 
   function setAgentPath(path) {
@@ -280,6 +306,11 @@ Item {
 
   function setUiZoom(zoom) {
     root.uiZoom = Math.max(0.6, Math.min(2.5, Math.round(zoom * 10) / 10))
+    root.persistSettings()
+  }
+
+  function setPopoverZoom(zoom) {
+    root.popoverZoom = Math.max(0.6, Math.min(2.5, Math.round(zoom * 10) / 10))
     root.persistSettings()
   }
 
@@ -656,6 +687,10 @@ Item {
     else if (mode === "exportQuestionnairePdf") root.startQuestionnairePdfExport(path)
     else if (mode === "exportQuestionnaireCsv") root.startQuestionnaireCsvExport(path)
     else if (mode === "exportQuestionnaireClassPdf") root.startQuestionnaireClassPdfExport(path)
+    else if (mode === "exportCompetencyCsv") root.startCompetencyCsvExport(path)
+    else if (mode === "exportCompetencyClassPdf") root.startCompetencyClassPdfExport(path)
+    else if (mode === "exportCompetencyReportPdf") root.startCompetencyReportPdfExport(path)
+    else if (mode === "exportStudentReportPdf") root.startStudentReportPdfExport(path)
   }
   function cancelPathEntry() { root.pathBarMode = "" }
 
@@ -996,6 +1031,7 @@ Item {
   property string correctionDraftType: "formative"
   property int correctionDraftDuree: 60
   property string correctionDraftNiveauClasse: "1ere"
+  property string correctionDraftGuideMode: "tout"
   property int correctionDraftBienveillance: 5
   property bool correctionDraftPriseDeNotes: false
   property bool correctionDraftCompletudeExigee: true
@@ -1042,6 +1078,7 @@ Item {
     root.correctionDraftType = "formative"
     root.correctionDraftDuree = 60
     root.correctionDraftNiveauClasse = "1ere"
+    root.correctionDraftGuideMode = "tout"
     root.correctionDraftBienveillance = 5
     root.correctionDraftPriseDeNotes = false
     root.correctionDraftCompletudeExigee = true
@@ -1382,6 +1419,7 @@ Item {
       typeEvaluation: root.correctionDraftType,
       dureeEpreuve: root.correctionDraftDuree,
       niveauClasse: root.correctionDraftNiveauClasse,
+      guideMode: root.correctionDraftGuideMode,
       bienveillance: root.correctionDraftBienveillance,
       priseDeNotes: root.correctionDraftPriseDeNotes,
       completudeExigee: root.correctionDraftCompletudeExigee,
@@ -1539,7 +1577,7 @@ Item {
       gridId: d.gridId,
       criteriaWeights: d.criteriaWeights,
       natureEvaluation: d.natureEvaluation, typeEvaluation: d.typeEvaluation,
-      dureeEpreuve: d.dureeEpreuve, niveauClasse: d.niveauClasse,
+      dureeEpreuve: d.dureeEpreuve, niveauClasse: d.niveauClasse, guideMode: d.guideMode,
       bienveillance: d.bienveillance, priseDeNotes: d.priseDeNotes,
       completudeExigee: d.completudeExigee,
       surinterpretation: d.surinterpretation, niveauDetail: d.niveauDetail,
@@ -1791,8 +1829,58 @@ Item {
     root.processCorrectionQueue()
   }
 
+  // Quota / overload guard (Gabriel, 2026-10-27, bac blanc: ~94 copies in a
+  // row). A transient "overloaded" error is retried twice after a pause; an
+  // exhausted quota — or an overload that lasts — PAUSES the whole batch
+  // instead of burning through the queue with a string of errors. Copies
+  // already done are kept; "Reprendre" restarts only the missing ones.
+  property bool correctionPaused: false
+  property string correctionPauseReason: ""
+  property bool _correctionRetryWait: false
+  property var _correctionRetries: ({})
+
+  // "quota" | "overload" | "" — read off the error text Claude Code prints.
+  function classifyCorrectionError(message) {
+    var m = String(message || "").toLowerCase()
+    if (/usage limit|limit reached|rate.?limit|quota|credit balance|out of (extra )?usage|too many requests|\b429\b|session limit|weekly limit|limit will reset/.test(m)) return "quota"
+    if (/overloaded|\b529\b|\b503\b|temporarily unavailable|service unavailable/.test(m)) return "overload"
+    return ""
+  }
+
+  Timer {
+    id: correctionRetryTimer
+    interval: 60000
+    repeat: false
+    onTriggered: { root._correctionRetryWait = false; root.processCorrectionQueue() }
+  }
+
+  function pauseCorrectionBatch(reason) {
+    root.correctionPaused = true
+    root.correctionPauseReason = reason
+  }
+
+  function resumeCorrectionQueue() {
+    root.correctionPaused = false
+    root.correctionPauseReason = ""
+    root._correctionRetries = ({})
+    root._correctionRetryWait = false
+    root.processCorrectionQueue()
+  }
+
+  // Gives up on the rest of a paused batch (the copy that failed stays in
+  // error; nothing done is touched).
+  function abandonPausedCorrectionBatch() {
+    root.correctionPaused = false
+    root.correctionPauseReason = ""
+    root._correctionRetries = ({})
+    root._correctionRetryWait = false
+    correctionRetryTimer.stop()
+    root.correctionQueue = []
+  }
+
   function processCorrectionQueue() {
     if (root.correctionRunningStudentId !== "") return
+    if (root.correctionPaused || root._correctionRetryWait) return
     if (root.correctionQueue.length === 0) return
     var next = root.correctionQueue[0]
     root.correctionQueue = root.correctionQueue.slice(1)
@@ -2079,11 +2167,57 @@ Item {
 
   function finalizeCorrectionError(message) {
     var ctx = root._correctionRunContext
-    if (ctx) root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, { status: "error", error: String(message || "").slice(0, 500) })
+    var kind = ctx ? root.classifyCorrectionError(message) : ""
+    var retried = false
+    var paused = false
+    if (ctx && kind !== "") {
+      var tries = root._correctionRetries[ctx.studentId] || 0
+      var again = { classId: ctx.classId, studentId: ctx.studentId }
+      if (kind === "overload" && tries < 2) {
+        // Transient overload: same copy again after a pause.
+        var retries = root._correctionRetries
+        retries[ctx.studentId] = tries + 1
+        root._correctionRetries = retries
+        root.correctionQueue = [again].concat(root.correctionQueue)
+        root._correctionRetryWait = true
+        correctionRetryTimer.restart()
+        retried = true
+      } else {
+        // Quota exhausted, or overload that lasts: pause the batch, keep this
+        // copy at the head of the queue for the resumption.
+        root.correctionQueue = [again].concat(root.correctionQueue)
+        root.pauseCorrectionBatch(kind === "quota"
+          ? "Quota Claude épuisé ou limite atteinte. Les copies déjà corrigées sont conservées ; « Reprendre » relancera les copies restantes."
+          : "Claude est surchargé depuis plusieurs essais. Les copies déjà corrigées sont conservées ; « Reprendre » relancera les copies restantes.")
+        paused = true
+      }
+    }
+    if (ctx) {
+      var note = retried ? "Claude surchargé — nouvel essai automatique dans 1 minute."
+        : paused ? "Lot en pause (quota ou surcharge) — cette copie sera relancée à la reprise."
+        : String(message || "").slice(0, 500)
+      root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, { status: "error", error: note })
+    }
     root._correctionRunContext = null
     root._competencyGrid = null
     root.correctionRunningStudentId = ""
     root.processCorrectionQueue()
+  }
+
+  // A "running" status that survived an omarchy-restart-shell (or a crash /
+  // out-of-tokens interruption) has no run behind it any more: the context
+  // that cancelCorrectionRun() relies on lived in memory only, so "⏹ Stopper"
+  // did nothing and the copy stayed "en cours" forever (Gabriel, 2026-10-19,
+  // Daniel SUN). With no run context, any "running" entry of the active
+  // évaluation is such an orphan — put it back to an error state.
+  function releaseOrphanRunningCorrections() {
+    var classId = root.currentCorrectionsClassId()
+    var ev = root.activeEvaluation()
+    if (!classId || !ev) return
+    for (var sid in ev.students) {
+      if (ev.students[sid].status === "running")
+        root.setCorrectionStudentPatch(classId, sid, { status: "error", error: "Correction interrompue." })
+    }
   }
 
   // Gabriel, 2026-09-27: launching a batch of corrections had no way to
@@ -2102,17 +2236,19 @@ Item {
     correctionAnonymizeCopyProc.running = false
     correctionProc.running = false
     competencyFillProc.running = false
-    competencyAppreciationProc.running = false
     questionnaireFillProc.running = false
     questionnairePdfInfoProc.running = false
     questionnaireRenderProc.running = false
     questionnaireImagesListProc.running = false
+    competencyBulletsProc.running = false
     var ctx = root._correctionRunContext
     if (ctx) root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, { status: "error", error: "Correction annulée." })
+    else root.releaseOrphanRunningCorrections()
     root._correctionRunContext = null
     root._competencyGrid = null
     root.correctionRunningStudentId = ""
     root.correctionQueue = []
+    root.abandonPausedCorrectionBatch()
   }
 
   // ---- questionnaire pipeline (Gabriel, 2026-10-11) ----------------------
@@ -2293,7 +2429,7 @@ Item {
     stderr: StdioCollector { id: questionnaireFillErr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        root.finalizeCorrectionError((questionnaireFillErr.text || "Échec de la correction du questionnaire.").slice(0, 500))
+        root.finalizeCorrectionError((questionnaireFillErr.text || questionnaireFillOut.text || "Échec de la correction du questionnaire.").slice(0, 500))
         return
       }
       root.finalizeQuestionnaireRun(questionnaireFillOut.text || "")
@@ -2561,8 +2697,12 @@ Item {
       + ");1/3 temps;Note finale (/" + ev.questionnaireBareme + ")"]
     root._questionnaireStudentsSorted().forEach(function(s) {
       var entry = CorrectionsStore.studentEntry(ev, s.id)
-      if (entry.excluded) return
       var fields = [ev.title, cls.name, Store.studentLabel(s)]
+      if (entry.excluded) {
+        fields.push("ABS", "ABS", "", "ABS")
+        lines.push(fields.map(function(f) { return Draw.csvField(f) }).join(";"))
+        return
+      }
       if (entry.status === "done") {
         var info = root.questionnaireNoteInfo(ev, entry)
         fields.push(QuestionnaireGrid.formatNote(info.computed.raw), info.baseValue, info.applied ? "oui" : "", info.finalValue)
@@ -2666,6 +2806,403 @@ Item {
     }
   }
 
+  // ---- export de classe, évaluations par grille de compétences -----------
+  // (Gabriel, 2026-10-21, fin de la correction du commentaire guidé de la
+  // 2nde B) Même esprit que les exports de l'onglet Eval. Compétences : un
+  // CSV des notes et un PDF unique, une fiche par page. Le PDF n'embarque
+  // jamais les commentaires par critère de l'agent (comme l'export
+  // individuel par défaut). Seules les copies "corrigées" sont imprimées.
+  property string competencyCsvExportedPath: ""
+  property string competencyClassPdfExportError: ""
+  property string competencyClassPdfExportedPath: ""
+  property string _pendingCompetencyClassPdfPath: ""
+  property string _competencyClassExportLastSrc: ""
+  readonly property string competencyClassExportSrcPath: root.stateDir + "/.ghclasses-competency-class-export.typ"
+
+  function evaluationIsCompetency() {
+    var ev = root.activeEvaluation()
+    return !!(ev && ev.pipeline !== "questionnaire" && ev.gridId && CompetencyGrids.findGrid(ev.gridId))
+  }
+
+  // Note shown/exported for a student: Gabriel's hand-typed override if any,
+  // else the live calculation — same as the individual PDF.
+  function _competencyNoteOf(ev, grid, entry) {
+    if (entry.noteSevere !== "" || entry.noteBienveillante !== "") return entry.noteSevere
+    return root._gridNote(grid, entry.competencyChecks, ev.criteriaWeights).severe
+  }
+
+  // Automatic note of a grid; a hybrid copy has none until every row —
+  // the teacher's too — is ticked ("à compléter").
+  function _gridNote(grid, checks, weights) {
+    if (grid && grid.hybrid && !CompetencyGrids.isGridComplete(grid, checks)) return { severe: "", bienveillante: "" }
+    return CompetencyGrids.computeWeightedNote(grid, checks, weights)
+  }
+
+  function buildCompetencyClassCsv() {
+    var ev = root.activeEvaluation()
+    var cls = root.activeClass()
+    if (!ev || !cls || !root.evaluationIsCompetency()) return ""
+    var grid = CompetencyGrids.findGrid(ev.gridId)
+    var lines = ["Devoir;Classe;Élève;Note"]
+    root._questionnaireStudentsSorted().forEach(function(s) {
+      var entry = CorrectionsStore.studentEntry(ev, s.id)
+      var note = entry.excluded ? "ABS" : (entry.status === "done" ? root._competencyNoteOf(ev, grid, entry) : "")
+      lines.push([ev.title, cls.name, Store.studentLabel(s), note].map(function(f) { return Draw.csvField(f) }).join(";"))
+    })
+    return lines.join("\n") + "\n"
+  }
+
+  function exportCompetencyCsv() {
+    var cls = root.activeClass()
+    var ev = root.activeEvaluation()
+    if (!cls || !ev) return
+    root.pathBarMode = "exportCompetencyCsv"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/notes-" + root.slugify(cls.name) + "-" + root.slugify(ev.title) + "-" + ts + ".csv"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  function startCompetencyCsvExport(destPath) {
+    root.competencyCsvExportedPath = ""
+    competencyCsvExportFile.path = destPath
+    var csv = root.buildCompetencyClassCsv()
+    Qt.callLater(function() { competencyCsvExportFile.setText(csv) })
+  }
+
+  FileView {
+    id: competencyCsvExportFile
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root.competencyCsvExportedPath = competencyCsvExportFile.path
+  }
+
+  function buildCompetencyClassTypst() {
+    var ev = root.activeEvaluation()
+    var cls = root.activeClass()
+    if (!ev || !cls || !root.evaluationIsCompetency()) return ""
+    var grid = CompetencyGrids.findGrid(ev.gridId)
+    var bullets = root.evaluationUsesBullets(ev)
+    var entries = []
+    root._questionnaireStudentsSorted().forEach(function(s) {
+      var entry = CorrectionsStore.studentEntry(ev, s.id)
+      if (entry.excluded || entry.status !== "done") return
+      entries.push({ studentLabel: Store.studentLabel(s), payload: {
+        checks: entry.competencyChecks,
+        appreciation: (bullets && !entry.pdfShowAppreciation) ? "" : entry.appreciation,
+        note: root._competencyNoteOf(ev, grid, entry) || "",
+        justifications: entry.competencyJustifications,
+        includeJustifications: false,
+        inlineNote: true,
+        comments: bullets ? (entry.pdfShowComments ? entry.commentBullets : []) : [],
+        bulletsMode: bullets,
+        plan: ((grid.hybrid || grid.hasPlan) && entry.pdfShowPlan) ? entry.plan : ""
+      } })
+    })
+    if (!entries.length) return ""
+    return CompetencyGrids.buildClassEvaluationTypst(cls.name, grid, ev.title, undefined, entries)
+  }
+
+  function exportCompetencyClassPdf() {
+    var cls = root.activeClass()
+    var ev = root.activeEvaluation()
+    if (!cls || !ev) return
+    root.pathBarMode = "exportCompetencyClassPdf"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/grilles-" + root.slugify(cls.name) + "-" + root.slugify(ev.title) + "-" + ts + ".pdf"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  function startCompetencyClassPdfExport(destPath) {
+    var src = root.buildCompetencyClassTypst()
+    root.competencyClassPdfExportError = ""
+    root.competencyClassPdfExportedPath = ""
+    if (!src) { root.competencyClassPdfExportError = "Aucune copie corrigée à exporter."; return }
+    root._pendingCompetencyClassPdfPath = destPath
+    // Même garde-fou que les autres exports : setText n'émet pas onSaved si
+    // le contenu est identique.
+    if (src === root._competencyClassExportLastSrc) {
+      root._startCompetencyClassPdfCompile()
+    } else {
+      root._competencyClassExportLastSrc = src
+      competencyClassExportSrcFile.setText(src)
+    }
+  }
+
+  function _startCompetencyClassPdfCompile() {
+    competencyClassPdfCompileProc.command = ["typst", "compile", root.competencyClassExportSrcPath, root._pendingCompetencyClassPdfPath]
+    competencyClassPdfCompileProc.running = false
+    competencyClassPdfCompileProc.running = true
+  }
+
+  FileView {
+    id: competencyClassExportSrcFile
+    path: root.competencyClassExportSrcPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root._startCompetencyClassPdfCompile()
+  }
+
+  Process {
+    id: competencyClassPdfCompileProc
+    stderr: StdioCollector { id: competencyClassPdfCompileErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.competencyClassPdfExportError = (competencyClassPdfCompileErr.text || "Échec de l'export PDF.").slice(0, 500)
+        return
+      }
+      root.competencyClassPdfExportedPath = root._pendingCompetencyClassPdfPath
+    }
+  }
+
+  // ---- rapport de correction (Gabriel, 2026-10-21) -----------------------
+  // On demand only (button), once the class is corrected: per criterion the
+  // palier counts (computed here) + a synthesis of the recurring faults, one
+  // text-only agent call per criterion, run one after the other. Anonymous.
+  // See lib/ClassReport.js. The syntheses are kept in memory until the PDF
+  // is saved, so a cancelled/failed save does not cost new agent calls.
+  property bool reportRunning: false
+  property string reportProgress: ""
+  property string reportError: ""
+  property string reportPdfExportedPath: ""
+  property var _reportCtx: null
+  property bool _reportRetried: false
+  property string _reportMode: "full"   // "full" | "student" (version élèves / familles)
+  property var _studentSections: []
+  property var _reportEntries: []
+  property var _reportQueue: []
+  property var _reportSections: []
+  property int _reportTotal: 0
+  property string _pendingReportPdfPath: ""
+  property string _reportExportLastSrc: ""
+  readonly property string reportExportSrcPath: root.stateDir + "/.ghclasses-report-export.typ"
+  // Syntheses of the full report, kept on disk per class (Gabriel,
+  // 2026-10-21) so the student digest never re-runs the criteria after a
+  // shell restart: { "<classId>": { sig, evaluationTitle, sections } }.
+  readonly property string reportCachePath: root.stateDir + "/report-syntheses.json"
+  FileView {
+    id: reportCacheFile
+    path: root.reportCachePath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+  }
+
+  function _readReportCache() {
+    try { return JSON.parse(reportCacheFile.text() || "{}") } catch (e) { return {} }
+  }
+
+  function _saveReportCache() {
+    var c = root._reportCtx
+    if (!c || root._reportSections.length === 0) return
+    var all = root._readReportCache()
+    all[c.classId] = { sig: c.sig, evaluationTitle: c.evaluationTitle, sections: root._reportSections }
+    reportCacheFile.setText(JSON.stringify(all))
+  }
+
+  function startCompetencyReport(mode) {
+    if (root.reportRunning || !root.evaluationIsCompetency()) return
+    root._reportMode = mode === "student" ? "student" : "full"
+    var ev = root.activeEvaluation()
+    var cls = root.activeClass()
+    var grid = CompetencyGrids.findGrid(ev.gridId)
+    var entries = []
+    root._questionnaireStudentsSorted().forEach(function(s) {
+      var entry = CorrectionsStore.studentEntry(ev, s.id)
+      if (entry.excluded || entry.status !== "done") return
+      entries.push({ checks: entry.competencyChecks, justifications: entry.competencyJustifications, note: root._competencyNoteOf(ev, grid, entry) })
+    })
+    root.reportError = ""
+    root.reportPdfExportedPath = ""
+    if (entries.length === 0) { root.reportError = "Aucune copie corrigée : rien à synthétiser."; return }
+    var stats = ClassReport.computeStats(grid, entries)
+    // The student digest is derived from the full report's syntheses: when
+    // they are still in memory and the class's palier counts have not moved,
+    // reuse them instead of re-running every criterion.
+    var sig = JSON.stringify(stats.rows.map(function(r) { return r.counts }))
+    var classId = root.currentCorrectionsClassId()
+    var cached = false
+    if (root._reportMode === "student") {
+      var onDisk = root._readReportCache()[classId]
+      if (onDisk && onDisk.sig === sig && onDisk.evaluationTitle === ev.title && (onDisk.sections || []).length > 0) {
+        root._reportSections = onDisk.sections
+        cached = true
+      }
+    }
+    root._reportCtx = { className: cls.name, evaluationTitle: ev.title, gridName: grid.name, baremeTotal: ev.baremeTotal, stats: stats, sig: sig, classId: classId }
+    if (root._reportMode === "student" && cached) { root._startStudentSummary(); return }
+    root._reportEntries = entries
+    root._reportQueue = stats.rows.slice()
+    root._reportSections = []
+    root._reportTotal = stats.rows.length
+    root.reportRunning = true
+    root._reportNext()
+  }
+
+  function _reportNext() {
+    if (!root.reportRunning) return
+    while (root._reportQueue.length > 0) {
+      var row = root._reportQueue[0]
+      var items = ClassReport.collectItems(row.idx, root._reportEntries)
+      root.reportProgress = "Rapport : critère " + (root._reportTotal - root._reportQueue.length + 1) + "/" + root._reportTotal + "…"
+      if (items.length === 0) {
+        // Everyone at "Maîtrisé" (or no remark at all): nothing to synthesize.
+        root._reportSections = root._reportSections.concat([{ text: row.text, counts: row.counts, total: row.total,
+          synthese: row.total > 0 && row.counts[3] === row.total ? "Critère maîtrisé par l'ensemble de la classe." : "", fautes: [] }])
+        root._reportQueue = root._reportQueue.slice(1)
+        continue
+      }
+      var c = root._reportCtx
+      var prompt = ClassReport.buildCriterionPrompt({ evaluationTitle: c.evaluationTitle, className: c.className, gridName: c.gridName,
+        criterionText: row.text, counts: row.counts, items: items })
+      reportCriterionProc.command = ClaudeRunner.buildCommand(prompt, { model: "sonnet", effort: "low" })
+      reportCriterionProc.running = false
+      reportCriterionProc.running = true
+      return
+    }
+    root._reportFinish()
+  }
+
+  Process {
+    id: reportCriterionProc
+    stdout: StdioCollector { id: reportCriterionOut; waitForEnd: true }
+    stderr: StdioCollector { id: reportCriterionErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (!root.reportRunning || root._reportQueue.length === 0) return   // cancelled meanwhile
+      var row = root._reportQueue[0]
+      var parsed = exitCode === 0 ? ClassReport.parseCriterion(reportCriterionOut.text || "") : { synthese: "", fautes: [] }
+      // One retry per criterion (a transient "Overloaded" must not leave a hole
+      // in the report); the second failure is reported in the PDF itself.
+      if (parsed.synthese === "" && !root._reportRetried) {
+        root._reportRetried = true
+        reportCriterionProc.running = false
+        reportCriterionProc.running = true
+        return
+      }
+      root._reportRetried = false
+      if (parsed.synthese === "") parsed.synthese = "(Synthèse indisponible pour ce critère : l'appel a échoué.)"
+      root._reportSections = root._reportSections.concat([{ text: row.text, counts: row.counts, total: row.total, synthese: parsed.synthese, fautes: parsed.fautes }])
+      root._reportQueue = root._reportQueue.slice(1)
+      root._reportNext()
+    }
+  }
+
+  function cancelCompetencyReport() {
+    root._reportRetried = false
+    reportCriterionProc.running = false
+    studentSummaryProc.running = false
+    root.reportRunning = false
+    root.reportProgress = ""
+    root._reportQueue = []
+  }
+
+  function _reportFinish() {
+    root._saveReportCache()
+    if (root._reportMode === "student") { root._startStudentSummary(); return }
+    root.reportRunning = false
+    root.reportProgress = ""
+    var cls = root.activeClass()
+    var ev = root.activeEvaluation()
+    root.pathBarMode = "exportCompetencyReportPdf"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/rapport-" + root.slugify(cls ? cls.name : "classe") + "-" + root.slugify(ev ? ev.title : "devoir") + "-" + ts + ".pdf"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  // Version élèves / familles (Gabriel, 2026-10-21): every criterion in the
+  // grid's order, the code does the counting, ONE text-only call writes the
+  // sentences from the full report's syntheses.
+  function _startStudentSummary() {
+    var c = root._reportCtx
+    root.reportRunning = true
+    root.reportProgress = "Version élèves / familles : rédaction…"
+    var prompt = ClassReport.buildStudentSummaryPrompt({ evaluationTitle: c.evaluationTitle, className: c.className, sections: root._reportSections })
+    studentSummaryProc.command = ClaudeRunner.buildCommand(prompt, { model: "sonnet", effort: "low" })
+    studentSummaryProc.running = false
+    studentSummaryProc.running = true
+  }
+
+  Process {
+    id: studentSummaryProc
+    stdout: StdioCollector { id: studentSummaryOut; waitForEnd: true }
+    stderr: StdioCollector { id: studentSummaryErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (!root.reportRunning) return   // cancelled meanwhile
+      var parsed = exitCode === 0 ? ClassReport.parseStudentSummary(studentSummaryOut.text || "") : { byNumber: {} }
+      // An agent failure still yields a usable page: the first sentence of
+      // each criterion's own synthesis stands in for a missing sentence.
+      root._studentSections = root._reportSections.map(function(sec, i) {
+        return { text: sec.text, counts: sec.counts, total: sec.total, sentence: parsed.byNumber[i + 1] || ClassReport.firstSentence(sec.synthese) }
+      })
+      root.reportRunning = false
+      root.reportProgress = ""
+      var cls = root.activeClass()
+      var ev = root.activeEvaluation()
+      root.pathBarMode = "exportStudentReportPdf"
+      var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+      pathBarField.text = root.homeDir + "/Downloads/bilan-eleves-" + root.slugify(cls ? cls.name : "classe") + "-" + root.slugify(ev ? ev.title : "devoir") + "-" + ts + ".pdf"
+      Qt.callLater(function() { pathBarField.forceActiveFocus() })
+    }
+  }
+
+  function startStudentReportPdfExport(destPath) {
+    var c = root._reportCtx
+    root.reportError = ""
+    root.reportPdfExportedPath = ""
+    if (!c || root._studentSections.length === 0) { root.reportError = "Aucun bilan à enregistrer : relance-le."; return }
+    var src = ClassReport.buildStudentReportTypst({ className: c.className, evaluationTitle: c.evaluationTitle,
+      baremeTotal: c.baremeTotal, stats: c.stats, sections: root._studentSections })
+    root._writeReportSourceAndCompile(src, destPath)
+  }
+
+  function _writeReportSourceAndCompile(src, destPath) {
+    root._pendingReportPdfPath = destPath
+    if (src === root._reportExportLastSrc) {
+      root._startReportPdfCompile()
+    } else {
+      root._reportExportLastSrc = src
+      reportExportSrcFile.setText(src)
+    }
+  }
+
+  function startCompetencyReportPdfExport(destPath) {
+    var c = root._reportCtx
+    root.reportError = ""
+    root.reportPdfExportedPath = ""
+    if (!c || root._reportSections.length === 0) { root.reportError = "Aucun rapport à enregistrer : relance-le."; return }
+    var src = ClassReport.buildReportTypst({ className: c.className, evaluationTitle: c.evaluationTitle, gridName: c.gridName,
+      baremeTotal: c.baremeTotal, stats: c.stats, sections: root._reportSections })
+    root._writeReportSourceAndCompile(src, destPath)
+  }
+
+  function _startReportPdfCompile() {
+    reportPdfCompileProc.command = ["typst", "compile", root.reportExportSrcPath, root._pendingReportPdfPath]
+    reportPdfCompileProc.running = false
+    reportPdfCompileProc.running = true
+  }
+
+  FileView {
+    id: reportExportSrcFile
+    path: root.reportExportSrcPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: root._startReportPdfCompile()
+  }
+
+  Process {
+    id: reportPdfCompileProc
+    stderr: StdioCollector { id: reportPdfCompileErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.reportError = (reportPdfCompileErr.text || "Échec de l'export du rapport.").slice(0, 500)
+        return
+      }
+      root.reportPdfExportedPath = root._pendingReportPdfPath
+    }
+  }
+
   function startQuestionnairePdfExport(destPath) {
     var src = root.buildQuestionnaireTypst(root._questionnaireExportStudentId)
     if (!src) return
@@ -2735,6 +3272,8 @@ Item {
   // fully independent (agreeing with the note but not the appreciation,
   // or vice versa, must be possible).
   property bool _competencyAppreciationOnly: false
+  // Which regeneration is running, for the popover's button labels.
+  property string competencyRegenKind: ""
   // One-shot free text Gabriel can attach before regenerating the
   // appreciation only (ex. "l'axe II, bien que complet, est bâclé") —
   // reuses StudentCorrection.addendum, same one-shot/consumed-after-use
@@ -2747,6 +3286,7 @@ Item {
   property string _competencyAppreciationLength: "moyenne"
 
   function startCompetencyGridFill() {
+    root.competencyRegenKind = ""
     var ctx = root._correctionRunContext
     if (!ctx) return
     var ev = CorrectionsStore.getEvaluation(root.corrections, ctx.classId)
@@ -2766,15 +3306,18 @@ Item {
     root._competencyBullets = null
     root._competencyConclusion = ""
     root._competencyDoubts = ({})
+    root._competencyPlan = ""
     root._competencyMaxBullets = CommentGuidePromptBuilder.DEFAULT_MAX_BULLETS
     var studentEntry = CorrectionsStore.studentEntry(ev, ctx.studentId)
     var prompt = CompetencyPromptBuilder.buildFillGridPrompt({
-      guided: !!grid.bullets, tiersTemps: !!studentEntry.tiersTempsAmenage,
+      guided: !!grid.bullets, hybrid: !!grid.hybrid, extractPlan: !!(grid.hybrid || grid.hasPlan), tiersTemps: !!studentEntry.tiersTempsAmenage,
       copyPath: ctx.anonymizedCopyPath,
       writingMode: writingMode,
       sujetPath: ev.sujetPath, corrigePath: ev.corrigePath,
-      niveauClasse: ev.niveauClasse, bienveillance: ev.bienveillance, complements: ev.complements,
-      gridRubricText: CompetencyGrids.buildGridRubricText(grid), rows: grid.rows
+      niveauClasse: ev.niveauClasse, guideMode: ev.guideMode, bienveillance: ev.bienveillance, complements: ev.complements,
+      gridRubricText: CompetencyGrids.buildGridRubricText(grid),
+      // Hybrid grid: the agent only sees (and is told about) its own rows.
+      rows: grid.hybrid ? grid.rows.filter(function(r) { return r.owner !== "teacher" }) : grid.rows
     })
     competencyFillProc.command = ClaudeRunner.buildCheckCommand(prompt, root.correctionRunAgentOpts())
     competencyFillProc.running = false
@@ -2787,7 +3330,7 @@ Item {
     stderr: StdioCollector { id: competencyFillErr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode !== 0) {
-        root.finalizeCorrectionError((competencyFillErr.text || "Échec du remplissage de la grille.").slice(0, 500))
+        root.finalizeCorrectionError((competencyFillErr.text || competencyFillOut.text || "Échec du remplissage de la grille.").slice(0, 500))
         return
       }
       var parsed = CompetencyPromptBuilder.parseFilledGrid(competencyFillOut.text || "", root._competencyGrid.rows)
@@ -2796,6 +3339,7 @@ Item {
       root._competencyLog = parsed.log
       root._competencyConclusion = parsed.conclusion || ""
       root._competencyDoubts = parsed.doubts || {}
+      root._competencyPlan = parsed.plan || ""
       root.startCompetencyAppreciation()
     }
   }
@@ -2807,17 +3351,18 @@ Item {
   property var _competencyBullets: null
   property string _competencyConclusion: ""
   property var _competencyDoubts: ({})
+  property string _competencyPlan: "" // hybrid grids: the student's plan as extracted by the agent
   property int _competencyMaxBullets: 0
 
+  // Since 2026-10-27 (Gabriel) no appréciation is ever generated by the
+  // agent: the field is written by hand, and a (re-)correction leaves it
+  // alone. Only the "Commentaire guidé" bullets start empty, so a
+  // re-correction never keeps the tasks of a previous reading of the copy.
   function startCompetencyAppreciation() {
     var grid = root._competencyGrid
     if (!grid) { root.finalizeCorrectionError("Grille perdue en cours de correction."); return }
-    if (grid.bullets) { root.startCommentBullets(); return }
-    root._competencyBullets = null
-    var prompt = PromptBuilder.buildEvalAppreciationPrompt(grid.name, grid.rows, CompetencyGrids.COLUMNS, root._competencyChecks, "", root._competencyAddendum, root._competencyJustifications, root._competencyAppreciationLength)
-    competencyAppreciationProc.command = ClaudeRunner.buildCommand(prompt, root.correctionRunAgentOpts())
-    competencyAppreciationProc.running = false
-    competencyAppreciationProc.running = true
+    root._competencyBullets = grid.bullets ? [] : null
+    root.finalizeCompetencyFullRun()
   }
 
   function startCommentBullets() {
@@ -2844,24 +3389,15 @@ Item {
       }
       var parsed = CommentGuidePromptBuilder.parseBullets(competencyBulletsOut.text || "", root._competencyMaxBullets, root._competencyGrid.categories)
       root._competencyBullets = parsed.bullets
-      root._competencyAppreciation = parsed.personal
-      if (root._competencyAppreciationOnly) root.finalizeCompetencyAppreciationOnly()
-      else root.finalizeCompetencyFullRun()
-    }
-  }
-
-  Process {
-    id: competencyAppreciationProc
-    stdout: StdioCollector { id: competencyAppreciationOut; waitForEnd: true }
-    stderr: StdioCollector { id: competencyAppreciationErr; waitForEnd: true }
-    onExited: function(exitCode) {
-      if (exitCode !== 0) {
-        root.finalizeCorrectionError((competencyAppreciationErr.text || "Échec de la génération de l'appréciation.").slice(0, 500))
-        return
-      }
-      root._competencyAppreciation = (competencyAppreciationOut.text || "").trim()
-      if (root._competencyAppreciationOnly) root.finalizeCompetencyAppreciationOnly()
-      else root.finalizeCompetencyFullRun()
+      // Commentaire guidé: the appréciation is now the summary of the
+      // per-critère comments (Gabriel, 2026-10-19), written by its own
+      // button — regenerating only the bullets must leave it untouched; a
+      // full re-correction starts it over empty (never leave a stale summary
+      // of a previous reading of the copy).
+      // (A QML string property can't hold undefined — "leave it untouched"
+      // is expressed by finalizeCompetencyAppreciationOnly's argument.)
+      if (root._competencyAppreciationOnly) root.finalizeCompetencyAppreciationOnly(true)
+      else { root._competencyAppreciation = ""; root.finalizeCompetencyFullRun() }
     }
   }
 
@@ -2882,10 +3418,10 @@ Item {
       status: "done",
       competencyChecks: root._competencyChecks,
       competencyJustifications: root._competencyJustifications,
-      appreciation: root._competencyAppreciation,
       commentBullets: root._competencyBullets !== null ? root._competencyBullets : undefined,
       conclusionNote: root._competencyBullets !== null ? root._competencyConclusion : undefined,
       competencyDoubts: root._competencyDoubts,
+      plan: (root._competencyGrid && (root._competencyGrid.hybrid || root._competencyGrid.hasPlan)) ? root._competencyPlan : undefined,
       log: needsReview ? logTrim : "",
       needsReview: needsReview,
       error: "",
@@ -2901,12 +3437,12 @@ Item {
   // Companion to finalizeCompetencyFullRun() for "Régénérer l'appréciation"
   // alone — touches appreciation (and consumes the one-shot addendum) only,
   // the grid/log/note are left exactly as they were.
-  function finalizeCompetencyAppreciationOnly() {
+  function finalizeCompetencyAppreciationOnly(keepAppreciation) {
     var ctx = root._correctionRunContext
     if (!ctx) return
     root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, {
       status: "done",
-      appreciation: root._competencyAppreciation,
+      appreciation: keepAppreciation ? undefined : root._competencyAppreciation,
       commentBullets: root._competencyBullets !== null ? root._competencyBullets : undefined,
       addendum: ""
     })
@@ -2926,7 +3462,7 @@ Item {
     var grid = CompetencyGrids.findGrid(ev.gridId)
     if (!grid) return { severe: "", bienveillante: "" }
     var entry = CorrectionsStore.studentEntry(ev, studentId)
-    return CompetencyGrids.computeWeightedNote(grid, entry.competencyChecks, ev.criteriaWeights)
+    return root._gridNote(grid, entry.competencyChecks, ev.criteriaWeights)
   }
 
   // What's actually shown/exported for a student: Gabriel's hand-typed
@@ -3051,43 +3587,14 @@ Item {
     root.openCorrectionCopy(root.competencyGridPopoverEntry().copyPath)
   }
 
-  // Re-runs the appreciation ONLY, from the grid AS IT CURRENTLY STANDS —
-  // never re-reads the copy, and never touches the note (Gabriel,
-  // 2026-09-27: the two regenerations are independent on purpose — he may
-  // agree with one and not the other). addendumText is an optional one-shot
-  // instruction ("l'axe II, bien que complet, est bâclé") taken into
-  // account for this rédaction only, then consumed. lengthOption is
-  // "courte"/"moyenne"/"longue" from the dropdown beside the button
-  // (Gabriel, 2026-09-28), defaulting to "moyenne".
-  function requestRegenerateCompetencyAppreciation(studentId, addendumText, lengthOption) {
-    if (root.correctionRunningStudentId !== "") return
-    var classId = root.currentCorrectionsClassId()
-    var ev = root.activeEvaluation()
-    if (!classId || !ev || !ev.gridId || !studentId) return
-    var grid = CompetencyGrids.findGrid(ev.gridId)
-    if (!grid) return
-    var entry = CorrectionsStore.studentEntry(ev, studentId)
-    root.correctionRunningStudentId = studentId
-    root.setCorrectionStudentPatch(classId, studentId, { status: "running", error: "" })
-    root._correctionRunContext = { classId: classId, studentId: studentId }
-    root._competencyGrid = grid
-    root._competencyChecks = entry.competencyChecks
-    root._competencyJustifications = entry.competencyJustifications
-    root._competencyLog = entry.log
-    root._competencyConclusion = entry.conclusionNote
-    root._competencyMaxBullets = CommentGuidePromptBuilder.DEFAULT_MAX_BULLETS
-    root._competencyAppreciationOnly = true
-    root._competencyAddendum = String(addendumText || "").trim()
-    root._competencyAppreciationLength = lengthOption || "moyenne"
-    root.startCompetencyAppreciation()
-  }
-
   // Re-runs the bullet comments ONLY for a "Commentaire guidé" student, from
-  // the grid as it currently stands (never re-reads the copy). maxBullets
-  // lets Gabriel raise the 8-bullet ceiling during a correction session
-  // (Gabriel, 2026-10-15) — the agent still writes only as many as needed.
+  // the grid as it currently stands (never re-reads the copy). Since
+  // 2026-10-19 (Gabriel) the list is an "exercice de correction": 5 tasks at
+  // most in total, least successful criteria first; maxBullets is kept only
+  // as an optional override of that ceiling.
   function requestRegenerateCommentBullets(studentId, maxBullets) {
     if (root.correctionRunningStudentId !== "") return
+    root.competencyRegenKind = "bullets"
     var classId = root.currentCorrectionsClassId()
     var ev = root.activeEvaluation()
     if (!classId || !ev || !ev.gridId || !studentId) return
@@ -3108,6 +3615,21 @@ Item {
     root.startCommentBullets()
   }
 
+  // Per-student "Afficher dans le PDF" boxes (Gabriel, 2026-10-19).
+  function setCommentPdfFlag(studentId, field, value) {
+    var classId = root.currentCorrectionsClassId()
+    if (!classId || !studentId) return
+    var patch = {}
+    patch[field] = !!value
+    root.setCorrectionStudentPatch(classId, studentId, patch)
+  }
+
+  function competencyIsHybrid() {
+    var ev = root.activeEvaluation()
+    var g = (ev && ev.gridId) ? CompetencyGrids.findGrid(ev.gridId) : null
+    return !!(g && g.hybrid)
+  }
+
   function evaluationUsesBullets(ev) {
     var g = (ev && ev.gridId) ? CompetencyGrids.findGrid(ev.gridId) : null
     return !!(g && g.bullets)
@@ -3125,6 +3647,20 @@ Item {
     var entry = CorrectionsStore.studentEntry(ev, studentId)
     root.setCorrectionStudentPatch(root.currentCorrectionsClassId(), studentId, {
       commentBullets: entry.commentBullets.filter(function(b) { return b.id !== bulletId })
+    })
+  }
+
+  // "✏ Modifier" on a task: rewords it for THIS copy only (the bank entry it
+  // came from is never touched). An empty text is ignored.
+  function editCommentBullet(studentId, bulletId, text) {
+    var t = String(text || "").trim()
+    var ev = root.activeEvaluation()
+    if (!t || !ev || !studentId) return
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    root.setCorrectionStudentPatch(root.currentCorrectionsClassId(), studentId, {
+      commentBullets: entry.commentBullets.map(function(b) {
+        return b.id !== bulletId ? b : { id: b.id, text: t, tag: b.tag, bankId: b.bankId, isNew: b.isNew }
+      })
     })
   }
 
@@ -3203,15 +3739,16 @@ Item {
     var effectiveNote = root.competencyEffectiveNote(studentId)
     var payload = {
       checks: entry.competencyChecks,
-      appreciation: entry.appreciation,
+      appreciation: (root.evaluationUsesBullets(ev) && !entry.pdfShowAppreciation) ? "" : entry.appreciation,
       note: effectiveNote.severe || "",
       justifications: entry.competencyJustifications,
       includeJustifications: root.competencyExportIncludeJustifications,
       // Gabriel, 2026-09-27: note en gras à la fin du paragraphe
       // d'appréciation, plus de section séparée — voir buildTypstSource().
       inlineNote: true,
-      comments: root.evaluationUsesBullets(ev) ? entry.commentBullets : [],
-      bulletsMode: root.evaluationUsesBullets(ev)
+      comments: root.evaluationUsesBullets(ev) ? (entry.pdfShowComments ? entry.commentBullets : []) : [],
+      bulletsMode: root.evaluationUsesBullets(ev),
+      plan: ((grid.hybrid || grid.hasPlan) && entry.pdfShowPlan) ? entry.plan : ""
     }
     return CompetencyGrids.buildTypstSource(Store.studentLabel(student), cls.name, grid, payload, ev.title)
   }
@@ -3591,7 +4128,7 @@ Item {
     var checks = {}
     Object.keys(b.checks || {}).forEach(function(k) { checks[k] = b.checks[k] })
     var comments = (b.comments || []).map(function(c) { return { id: c.id, text: c.text, tag: c.tag || "" } })
-    return { checks: checks, appreciation: b.appreciation || "", note: "", annotationsPositif: b.annotationsPositif || "", annotationsNegatif: b.annotationsNegatif || "", binome: binome || "", binomeAt: binomeAt || "", comments: comments }
+    return { checks: checks, appreciation: b.appreciation || "", note: "", annotationsPositif: b.annotationsPositif || "", annotationsNegatif: b.annotationsNegatif || "", binome: binome || "", binomeAt: binomeAt || "", comments: comments, deletedComments: (b.deletedComments || []).slice(), tiersTemps: !!b.tiersTemps, tiersTempsAt: b.tiersTempsAt || "", absent: !!b.absent, absentAt: b.absentAt || "" }
   }
 
   function _studentWithEvalEntry(s, gridId, entry) {
@@ -3613,7 +4150,16 @@ Item {
     var current = root._evalEntryOf(root._findStudent(cls, selfId), gridId) || {}
     return students.map(function(s) {
       if (s.id === selfId) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(entry, current.binome, current.binomeAt))
-      if (partnerId && s.id === partnerId) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(entry, selfId, current.binomeAt))
+      if (partnerId && s.id === partnerId) {
+        // 1/3 temps is personal: the partner keeps their OWN setting.
+        var partnerEntry = root._makeEvalEntry(entry, selfId, current.binomeAt)
+        var own = root._evalEntryOf(s, gridId)
+        partnerEntry.tiersTemps = !!(own && own.tiersTemps)
+        partnerEntry.tiersTempsAt = (own && own.tiersTempsAt) || ""
+        partnerEntry.absent = !!(own && own.absent)
+        partnerEntry.absentAt = (own && own.absentAt) || ""
+        return root._studentWithEvalEntry(s, gridId, partnerEntry)
+      }
       return s
     })
   }
@@ -3659,7 +4205,7 @@ Item {
       var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
       var partner = partnerId ? root._findStudent(cls, partnerId) : null
       var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
-      out.push({ value: s.id, label: (root.evaluationStudentDone(s) ? "✅ " : "") + label })
+      out.push({ value: s.id, label: (root.evaluationStudentAbsent(s) ? "🟥 " : (root.evaluationStudentDone(s) ? "✅ " : "")) + label })
       seen[s.id] = true
       if (partnerId) seen[partnerId] = true
     })
@@ -3821,8 +4367,88 @@ Item {
     var grid = root.activeEvaluationGrid()
     if (!grid) return ""
     var entry = root.evaluationGridEntry()
-    var checks = entry ? entry.checks : {}
-    return CompetencyGrids.computeWeightedNote(grid, checks, root.evaluationWeights()).severe
+    return root.evalNoteOf(grid, entry, root.evaluationWeights())
+  }
+
+  // Note of one student's grid entry, with the "1/3 temps" adjustment when
+  // that student has it ticked (same rule as the Corrections tab).
+  function evalNoteOf(grid, entry, weights) {
+    var base = CompetencyGrids.computeWeightedNote(grid, entry ? entry.checks : {}, weights).severe
+    if (base !== "" && entry && entry.tiersTemps) return CompetencyGrids.applyTiersTemps(base, root.evaluationBaremeTotal())
+    return base
+  }
+
+  // Note before the 1/3 temps adjustment, or "" when it is not applied to
+  // this entry — the exports print both when present.
+  function evalNoteBaseOf(grid, entry, weights) {
+    if (!entry || !entry.tiersTemps) return ""
+    return CompetencyGrids.computeWeightedNote(grid, entry.checks, weights).severe
+  }
+
+  function evaluationBaseNote() {
+    var grid = root.activeEvaluationGrid()
+    if (!grid) return ""
+    var entry = root.evaluationGridEntry()
+    return CompetencyGrids.computeWeightedNote(grid, entry ? entry.checks : {}, root.evaluationWeights()).severe
+  }
+
+  function evaluationTiersTemps() {
+    var entry = root.evaluationGridEntry()
+    return !!(entry && entry.tiersTemps)
+  }
+
+  function toggleEvaluationTiersTemps() {
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationStudentId) return
+    var entry = root._makeEvalEntry(root.evaluationGridEntry())
+    entry.tiersTemps = !entry.tiersTemps
+    entry.tiersTempsAt = new Date().toISOString()
+    root._commitEvalStudents(cls, root._evalWriteEntry(cls.students, entry))
+  }
+
+  function evaluationAbsent() {
+    var entry = root.evaluationGridEntry()
+    return !!(entry && entry.absent)
+  }
+
+  function toggleEvaluationAbsent() {
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationStudentId) return
+    var entry = root._makeEvalEntry(root.evaluationGridEntry())
+    entry.absent = !entry.absent
+    entry.absentAt = new Date().toISOString()
+    root._commitEvalStudents(cls, root._evalWriteEntry(cls.students, entry))
+  }
+
+  function evaluationStudentAbsent(student) {
+    var e = student && student.competencyGrids && student.competencyGrids[root.evaluationGridId]
+    return !!(e && e.absent)
+  }
+
+  // Counter under the student list: units (a binôme counts for one, like the
+  // dropdown) minus absents minus already-corrected copies.
+  function evaluationCounts() {
+    var cls = root.activeClass()
+    var res = { total: 0, absent: 0, done: 0, todo: 0 }
+    if (!cls) return res
+    var gridId = root.evaluationGridId
+    var seen = {}
+    cls.students.forEach(function(s) {
+      if (seen[s.id]) return
+      var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
+      seen[s.id] = true
+      if (partnerId) seen[partnerId] = true
+      res.total++
+      if (root.evaluationStudentAbsent(s)) res.absent++
+      else if (root.evaluationStudentDone(s)) res.done++
+    })
+    res.todo = res.total - res.absent - res.done
+    return res
+  }
+
+  function evaluationCountsText() {
+    var c = root.evaluationCounts()
+    return c.todo + " copie" + (c.todo > 1 ? "s" : "") + " à corriger  ·  " + c.done + " corrigée" + (c.done > 1 ? "s" : "") + "  ·  " + c.absent + " absent" + (c.absent > 1 ? "s" : "") + "  (sur " + c.total + ")"
   }
 
   // -1 = unchecked. Reads straight off the student object (no local
@@ -4200,11 +4826,23 @@ Item {
     evaluationCommentDraftField.text = ""
   }
 
+  // "✏ Modifier": rewords a comment for THIS copy only; the bank entry it may
+  // have come from is untouched. An empty text is ignored.
+  function editEvalComment(id, text) {
+    var t = String(text || "").trim()
+    var cls = root.activeClass()
+    if (!t || !cls || !root.evaluationStudentId) return
+    var entry = root._makeEvalEntry(root.evaluationGridEntry())
+    entry.comments = entry.comments.map(function(c) { return c.id !== id ? c : { id: c.id, text: t, tag: c.tag } })
+    root._commitEvalStudents(cls, root._evalWriteEntry(cls.students, entry))
+  }
+
   function removeEvalComment(id) {
     var cls = root.activeClass()
     if (!cls || !root.evaluationStudentId) return
     var entry = root._makeEvalEntry(root.evaluationGridEntry())
     entry.comments = entry.comments.filter(function(c) { return c.id !== id })
+    if (entry.deletedComments.indexOf(id) === -1) entry.deletedComments.push(id)
     root._commitEvalStudents(cls, root._evalWriteEntry(cls.students, entry))
   }
 
@@ -4278,7 +4916,8 @@ Item {
       checks: entry.checks || {},
       appreciation: evaluationAppreciationField.text,
       comments: entry.comments || [],
-      note: root.evaluationComputedNote()
+      note: root.evaluationComputedNote(),
+      noteBase: root.evaluationTiersTemps() ? root.evaluationBaseNote() : ""
     }
     return CompetencyGrids.buildTypstSource(root.evaluationStudentsLabel(), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
   }
@@ -4297,7 +4936,8 @@ Item {
       checks: entry.checks || {},
       appreciation: evaluationAppreciationField.text,
       comments: entry.comments || [],
-      note: root.evaluationComputedNote()
+      note: root.evaluationComputedNote(),
+      noteBase: root.evaluationTiersTemps() ? root.evaluationBaseNote() : ""
     }
     return CompetencyGrids.buildMarkdownSource(root.evaluationStudentsLabel(), cls.name, grid, payload, evaluationIntituleField.text, root.evaluationBaremeTotal())
   }
@@ -4500,7 +5140,7 @@ Item {
       if (partnerId) seen[partnerId] = true
       var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
       var entry = root._evalEntryOf(s, gridId)
-      var note = CompetencyGrids.computeWeightedNote(grid, entry ? entry.checks : {}, weights).severe
+      var note = (entry && entry.absent) ? "ABS" : root.evalNoteOf(grid, entry, weights)
       lines.push([Draw.csvField(intitule), Draw.csvField(cls.name), Draw.csvField(label), Draw.csvField(note)].join(";"))
     })
     return lines.join("\n") + "\n"
@@ -4556,11 +5196,11 @@ Item {
       var partner = partnerId ? root._findStudent(cls, partnerId) : null
       seen[s.id] = true
       if (partnerId) seen[partnerId] = true
-      if (!root.evaluationStudentDone(s)) return
+      if (root.evaluationStudentAbsent(s) || !root.evaluationStudentDone(s)) return
       var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
       var entry = root._evalEntryOf(s, gridId)
-      var note = CompetencyGrids.computeWeightedNote(grid, entry ? entry.checks : {}, weights).severe
-      entries.push({ studentLabel: label, payload: { checks: entry ? entry.checks : {}, appreciation: entry ? entry.appreciation : "", comments: entry ? (entry.comments || []) : [], note: note } })
+      var note = root.evalNoteOf(grid, entry, weights)
+      entries.push({ studentLabel: label, payload: { checks: entry ? entry.checks : {}, appreciation: entry ? entry.appreciation : "", comments: entry ? (entry.comments || []) : [], note: note, noteBase: root.evalNoteBaseOf(grid, entry, weights) } })
     })
     if (!entries.length) return ""
     return CompetencyGrids.buildClassEvaluationTypst(cls.name, grid, intitule, baremeTotal, entries)
@@ -4938,6 +5578,10 @@ Item {
                     : root.pathBarMode === "exportClassEvalPdf" ? "Exporter les fiches corrigées (.pdf) vers :"
                     : root.pathBarMode === "exportQuestionnaireCsv" ? "Exporter les notes du questionnaire (.csv) vers :"
                     : root.pathBarMode === "exportQuestionnaireClassPdf" ? "Exporter toutes les grilles corrigées (.pdf) vers :"
+                    : root.pathBarMode === "exportCompetencyCsv" ? "Exporter les notes (.csv) vers :"
+                    : root.pathBarMode === "exportCompetencyClassPdf" ? "Exporter toutes les grilles corrigées (.pdf) vers :"
+                    : root.pathBarMode === "exportCompetencyReportPdf" ? "Enregistrer le rapport de correction (.pdf) vers :"
+                    : root.pathBarMode === "exportStudentReportPdf" ? "Enregistrer le bilan élèves / familles (.pdf) vers :"
                     : "Exporter les statistiques (.csv) vers :"
                   color: Qt.darker(root.foreground, 1.4)
                   font.family: root.fontFamily
@@ -5054,6 +5698,72 @@ Item {
                 width: parent.width
                 text: "Grilles exportées : " + root.questionnaireClassPdfExportedPath
                 color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.competencyCsvExportedPath !== ""
+                width: parent.width
+                text: "Notes exportées : " + root.competencyCsvExportedPath
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.competencyClassPdfExportedPath !== ""
+                width: parent.width
+                text: "Grilles exportées : " + root.competencyClassPdfExportedPath
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.reportProgress !== ""
+                width: parent.width
+                text: root.reportProgress
+                color: Qt.darker(root.foreground, 1.3)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.reportPdfExportedPath !== ""
+                width: parent.width
+                text: "Rapport exporté : " + root.reportPdfExportedPath
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WrapAnywhere
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.reportError !== ""
+                width: parent.width
+                text: root.reportError
+                color: Color.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.competencyClassPdfExportError !== ""
+                width: parent.width
+                text: root.competencyClassPdfExportError
+                color: Color.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WrapAnywhere
@@ -5810,6 +6520,15 @@ Item {
                       font.pixelSize: Style.font.bodySmall
                       wrapMode: Text.WordWrap
                     }
+                    Text {
+                      visible: root.correctionDraftGridId === "commentaire-hybride"
+                      width: parent.width
+                      text: "Mode hybride : l'agent ne remplit que les critères techniques et la compréhension du texte, et relève le plan de l'élève ; la problématique, les axes, les analyses et les interprétations (👤) restent à cocher par vous. La note n'apparaît qu'une fois la grille complète, et l'appréciation se génère à la demande."
+                      color: Qt.darker(root.foreground, 1.4)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                    }
                     Button {
                       visible: root.correctionDraftGridId !== ""
                       text: "⚖️ Répartir les points par critère"
@@ -6094,6 +6813,23 @@ Item {
                       accent: root.accent
                       fontFamily: root.fontFamily
                       onChanged: function(v) { root.correctionDraftNiveauClasse = v }
+                    }
+
+                    Dropdown {
+                      visible: root.correctionDraftGridId === "commentaire-guide"
+                      width: parent.width
+                      label: "Ce que le sujet donne à l'élève"
+                      options: [
+                        { value: "tout", label: "Problématique, axes et sous-parties" },
+                        { value: "axes-sous-parties", label: "Axes et sous-parties" },
+                        { value: "axes", label: "Axes seulement" }
+                      ]
+                      value: root.correctionDraftGuideMode
+                      foreground: root.foreground
+                      background: root.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onChanged: function(v) { root.correctionDraftGuideMode = v }
                     }
 
                     Column {
@@ -6707,6 +7443,41 @@ Item {
                     textFormat: Text.PlainText
                   }
 
+                  // Lot en pause : quota épuisé ou surcharge durable.
+                  Column {
+                    visible: root.correctionPaused
+                    width: parent.width
+                    spacing: Style.spacing.xs
+
+                    Text {
+                      width: parent.width
+                      text: "⏸ Lot en pause — " + root.correctionPauseReason
+                      color: Color.urgent
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      font.bold: true
+                      wrapMode: Text.WordWrap
+                      textFormat: Text.PlainText
+                    }
+                    Row {
+                      spacing: Style.spacing.controlGap
+                      Button {
+                        text: "▶ Reprendre (" + root.correctionQueue.length + " restante" + (root.correctionQueue.length > 1 ? "s" : "") + ")"
+                        bordered: true
+                        foreground: root.foreground
+                        accent: root.accent
+                        onClicked: root.resumeCorrectionQueue()
+                      }
+                      Button {
+                        text: "Abandonner le lot"
+                        bordered: true
+                        foreground: root.foreground
+                        accent: Color.urgent
+                        onClicked: root.abandonPausedCorrectionBatch()
+                      }
+                    }
+                  }
+
                   // Exports de classe du pipeline questionnaire (Gabriel,
                   // 2026-10-13). Ligne à part plutôt que dans l'en-tête
                   // ci-dessus : cette Row est ancrée à droite et ne se
@@ -6728,6 +7499,46 @@ Item {
                       foreground: root.foreground
                       accent: root.accent
                       onClicked: root.exportQuestionnaireClassPdf()
+                    }
+                  }
+
+                  // Exports de classe, évaluations par grille de compétences
+                  // (Gabriel, 2026-10-21).
+                  Row {
+                    visible: root.evaluationIsCompetency()
+                    spacing: Style.spacing.controlGap
+
+                    Button {
+                      text: "📊 Exporter les notes (.csv)"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.exportCompetencyCsv()
+                    }
+                    Button {
+                      text: "📑 Exporter toutes les grilles corrigées (.pdf)"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: root.exportCompetencyClassPdf()
+                    }
+                    Button {
+                      text: (root.reportRunning && root._reportMode === "full") ? "⏹ Annuler le rapport" : "📈 Rapport de correction (.pdf)"
+                      bordered: true
+                      enabled: !root.reportRunning || root._reportMode === "full"
+                      foreground: root.foreground
+                      accent: root.accent
+                      tooltipText: "Statistiques par critère et synthèse des fautes récurrentes de la classe, à partir des commentaires par critère (un court appel agent par critère, sans noms d'élèves)"
+                      onClicked: root.reportRunning ? root.cancelCompetencyReport() : root.startCompetencyReport("full")
+                    }
+                    Button {
+                      text: (root.reportRunning && root._reportMode === "student") ? "⏹ Annuler le bilan" : "📄 Bilan élèves / familles (.pdf)"
+                      bordered: true
+                      enabled: !root.reportRunning || root._reportMode === "student"
+                      foreground: root.foreground
+                      accent: root.accent
+                      tooltipText: "Une page : moyenne et, pour chaque critère dans l'ordre de la fiche, un schéma coloré et une phrase (anonyme, avec quelques citations pour la compréhension et la langue)"
+                      onClicked: root.reportRunning ? root.cancelCompetencyReport() : root.startCompetencyReport("student")
                     }
                   }
 
@@ -6864,7 +7675,7 @@ Item {
                         readonly property var effectiveNote: root.competencyEffectiveNote(correctionRow.modelData.id)
                         Text {
                           visible: !correctionRow.entry.excluded && correctionRow.entry.status === "done" && correctionRow.usesGrid
-                          text: "Note : " + (correctionRow.effectiveNote.severe || "—") + " / 20"
+                          text: correctionRow.effectiveNote.severe ? ("Note : " + correctionRow.effectiveNote.severe + " / 20") : (root.competencyIsHybrid() ? "À compléter (critères enseignant)" : "Note : — / 20")
                           color: root.foreground
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.bodySmall
@@ -7069,16 +7880,50 @@ Item {
                   width: parent.width
                   spacing: Style.spacing.huge
 
-                  Dropdown {
-                    id: evaluationStudentDropdown
-                    label: "Élève"
-                    options: root.evaluationStudentListOptions()
-                    value: root.evaluationStudentDisplayId(root.evaluationStudentId)
-                    foreground: root.foreground
-                    background: root.background
-                    accent: root.accent
-                    fontFamily: root.fontFamily
-                    onChanged: function(value) { root.selectEvaluationStudent(value) }
+                  Column {
+                    spacing: Style.spacing.sm
+
+                    Row {
+                      spacing: Style.spacing.sm
+
+                      Dropdown {
+                        id: evaluationStudentDropdown
+                        label: "Élève"
+                        options: root.evaluationStudentListOptions()
+                        value: root.evaluationStudentDisplayId(root.evaluationStudentId)
+                        foreground: root.foreground
+                        background: root.background
+                        accent: root.accent
+                        fontFamily: root.fontFamily
+                        onChanged: function(value) { root.selectEvaluationStudent(value) }
+                      }
+
+                      Item {
+                        width: absentButton.width
+                        height: evaluationStudentDropdown.height
+                        visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null
+
+                        Button {
+                          id: absentButton
+                          anchors.bottom: parent.bottom
+                          text: root.evaluationAbsent() ? "🟥 Absent(e)" : "⬜ Absent(e)"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          tooltipText: "Coché : l'élève apparaît « ABS » dans l'export CSV et 🟥 dans la liste, et n'est pas compté dans les copies à corriger"
+                          onClicked: root.toggleEvaluationAbsent()
+                        }
+                      }
+                    }
+
+                    Text {
+                      visible: root.activeClass() !== null && root.activeEvaluationGrid() !== null
+                      text: root.evaluationCountsText()
+                      color: root.foreground
+                      opacity: 0.8
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
                   }
 
                   // Binôme (Gabriel, 2026-10-06) — see evaluationPartnerOptions().
@@ -7104,7 +7949,7 @@ Item {
                   Dropdown {
                     id: evaluationGridDropdown
                     label: "Type de tableau"
-                    options: CompetencyGrids.GRIDS.map(function(g) { return { value: g.id, label: g.name } })
+                    options: CompetencyGrids.GRIDS.filter(function(g) { return !g.correctionsOnly }).map(function(g) { return { value: g.id, label: g.name } })
                     value: root.evaluationGridId
                     foreground: root.foreground
                     background: root.background
@@ -7489,7 +8334,7 @@ Item {
                   spacing: Style.spacing.xxs
 
                   Text {
-                    text: "Commentaires"
+                    text: "Exercice de correction"
                     color: Qt.darker(root.foreground, 1.4)
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -7498,7 +8343,7 @@ Item {
 
                   Text {
                     width: parent.width
-                    text: "Bullet-points réutilisables d'une copie à l'autre — fusionnés avec l'Appréciation ci-dessus à l'export, sans distinction visible."
+                    text: "Consignes de correction réutilisables d'une copie à l'autre — exportées sous « Exercice de correction », après l'Appréciation si elle est remplie."
                     color: Qt.darker(root.foreground, 1.5)
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -7513,9 +8358,14 @@ Item {
                       width: parent ? parent.width : 0
                       spacing: Style.spacing.sm
 
+                      // Per-copy edit (Gabriel, 2026-10-27): rewords this
+                      // comment for THIS copy only, the bank is untouched.
+                      property bool editing: false
+
                       Text {
-                        width: parent.width - removeGlyph.width - Style.spacing.sm
-                        text: "• " + commentRow.modelData.text
+                        visible: !commentRow.editing
+                        width: parent.width - commentButtons.width - Style.spacing.sm
+                        text: "☐ " + commentRow.modelData.text
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.body
@@ -7523,18 +8373,53 @@ Item {
                         wrapMode: Text.WordWrap
                       }
 
-                      Text {
-                        id: removeGlyph
-                        text: "×"
-                        color: Qt.darker(root.foreground, 1.3)
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.title
-                        font.bold: true
+                      TextField {
+                        id: commentEditField
+                        visible: commentRow.editing
+                        width: parent.width - commentButtons.width - Style.spacing.sm
+                        foreground: root.foreground
+                        accent: root.accent
+                        Keys.onReturnPressed: { root.editEvalComment(commentRow.modelData.id, text); commentRow.editing = false }
+                        Keys.onEnterPressed: { root.editEvalComment(commentRow.modelData.id, text); commentRow.editing = false }
+                        Keys.onEscapePressed: commentRow.editing = false
+                      }
 
-                        HoverHandler { cursorShape: Qt.PointingHandCursor }
-                        MouseArea {
-                          anchors.fill: parent
-                          anchors.margins: -Style.space(6)
+                      Row {
+                        id: commentButtons
+                        spacing: Style.spacing.xs
+
+                        Button {
+                          visible: !commentRow.editing
+                          text: "✏ Modifier"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          tooltipText: "Reformule ce commentaire pour cette copie uniquement (la banque n'est pas modifiée)"
+                          onClicked: { commentEditField.text = commentRow.modelData.text; commentRow.editing = true; commentEditField.forceActiveFocus() }
+                        }
+                        Button {
+                          visible: commentRow.editing
+                          text: "✔ Valider"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          onClicked: { root.editEvalComment(commentRow.modelData.id, commentEditField.text); commentRow.editing = false }
+                        }
+                        Button {
+                          visible: commentRow.editing
+                          text: "Annuler"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          onClicked: commentRow.editing = false
+                        }
+                        Button {
+                          id: removeBtn
+                          visible: !commentRow.editing
+                          text: "Supprimer"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: Color.urgent
                           onClicked: root.removeEvalComment(commentRow.modelData.id)
                         }
                       }
@@ -7599,6 +8484,17 @@ Item {
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                       font.bold: true
+                    }
+
+                    Button {
+                      anchors.verticalCenter: parent.verticalCenter
+                      visible: root.evaluationBaseNote() !== ""
+                      text: root.evaluationTiersTemps() ? "✔ 1/3 temps appliqué (" + root.evaluationBaseNote() + " avant)" : "⏱ Appliquer 1/3 temps"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      tooltipText: "Rend à l'élève 15 % de ses points perdus : note + 0,15 × (barème − note), arrondi au demi-point — même calcul que l'onglet Corrections"
+                      onClicked: root.toggleEvaluationTiersTemps()
                     }
 
                     Button {
@@ -7918,6 +8814,8 @@ Item {
       // ---------------------------------------------------------- overlays
 
       ClassSettingsPopover {
+        zoom: root.popoverZoom
+        onZoomChangeRequested: function(z) { root.setPopoverZoom(z) }
         id: classSettingsPopover
         anchors.fill: parent
         opened: root.classSettingsOpen
@@ -7964,6 +8862,8 @@ Item {
 
 
       ArchivesPopover {
+        zoom: root.popoverZoom
+        onZoomChangeRequested: function(z) { root.setPopoverZoom(z) }
         anchors.fill: parent
         opened: root.archivesPopoverOpen
         entries: root.archiveEntries
@@ -7991,6 +8891,8 @@ Item {
       }
 
       CorrectionLogPopover {
+        zoom: root.popoverZoom
+        onZoomChangeRequested: function(z) { root.setPopoverZoom(z) }
         anchors.fill: parent
         opened: root.correctionLogPopoverStudentId !== ""
         studentLabel: root.correctionLogStudentLabel()
@@ -8021,6 +8923,8 @@ Item {
 
       CompetencyGridPopover {
         anchors.fill: parent
+        zoom: root.popoverZoom
+        onZoomChangeRequested: function(z) { root.setPopoverZoom(z) }
         opened: root.competencyGridPopoverStudentId !== ""
         studentLabel: root.competencyGridPopoverStudentLabel()
         grid: root.competencyGridPopoverGrid()
@@ -8030,11 +8934,16 @@ Item {
         appreciation: root.competencyGridPopoverEntry().appreciation
         bulletsMode: root.evaluationUsesBullets(root.activeEvaluation())
         bullets: root.competencyGridPopoverEntry().commentBullets
+        pdfShowAppreciation: root.competencyGridPopoverEntry().pdfShowAppreciation
+        pdfShowComments: root.competencyGridPopoverEntry().pdfShowComments
+        plan: root.competencyGridPopoverEntry().plan
+        pdfShowPlan: root.competencyGridPopoverEntry().pdfShowPlan
         note: root.competencyEffectiveNote(root.competencyGridPopoverStudentId).severe
         liveNote: root.competencyLiveNote(root.competencyGridPopoverStudentId).severe
         hasNoteOverride: root.competencyGridPopoverEntry().noteSevere !== "" || root.competencyGridPopoverEntry().noteBienveillante !== ""
         copyPath: root.competencyGridPopoverEntry().copyPath
         regenerating: root.correctionRunningStudentId !== "" && root.correctionRunningStudentId === root.competencyGridPopoverStudentId
+        regeneratingKind: root.competencyRegenKind
         foreground: root.foreground
         background: root.background
         accent: root.accent
@@ -8043,11 +8952,12 @@ Item {
         onCheckChanged: function(rowIndex, colIndex) { root.setCompetencyCheck(rowIndex, colIndex) }
         onAppreciationSaved: function(text) { root.saveCompetencyAppreciation(root.competencyGridPopoverStudentId, text) }
         onNoteSaved: function(note) { root.saveCompetencyNote(root.competencyGridPopoverStudentId, note) }
-        onRegenerateRequested: function(addendum, length) { root.requestRegenerateCompetencyAppreciation(root.competencyGridPopoverStudentId, addendum, length) }
         onBulletAdded: function(text) { root.addCorrectionCommentBullet(root.competencyGridPopoverStudentId, text) }
         onBulletRemoved: function(id) { root.removeCommentBullet(root.competencyGridPopoverStudentId, id) }
         onBulletBanked: function(id) { root.validateCommentBullet(root.competencyGridPopoverStudentId, id) }
+        onBulletEdited: function(id, text) { root.editCommentBullet(root.competencyGridPopoverStudentId, id, text) }
         onBankInsertRequested: root.openCorrectionCommentBank()
+        onPdfFlagChanged: function(field, value) { root.setCommentPdfFlag(root.competencyGridPopoverStudentId, field, value) }
         onBulletsRegenerateRequested: function(cap) { root.requestRegenerateCommentBullets(root.competencyGridPopoverStudentId, cap) }
         onResetNoteOverrideRequested: root.resetCompetencyNoteOverride(root.competencyGridPopoverStudentId)
         onCopyOpenRequested: root.openCompetencyGridCopy()
@@ -8055,6 +8965,8 @@ Item {
       }
 
       QuestionnaireGridPopover {
+        zoom: root.popoverZoom
+        onZoomChangeRequested: function(z) { root.setPopoverZoom(z) }
         anchors.fill: parent
         opened: root.questionnairePopoverStudentId !== ""
         studentLabel: root.questionnairePopoverStudentLabel()
@@ -8092,6 +9004,8 @@ Item {
       }
 
       CriteriaWeightsPopover {
+        zoom: root.popoverZoom
+        onZoomChangeRequested: function(z) { root.setPopoverZoom(z) }
         anchors.fill: parent
         opened: root.correctionWeightsPopoverOpen
         grid: root.activeEvaluation() ? CompetencyGrids.findGrid(root.activeEvaluation().gridId) : null
@@ -8106,6 +9020,8 @@ Item {
       }
 
       CriteriaWeightsPopover {
+        zoom: root.popoverZoom
+        onZoomChangeRequested: function(z) { root.setPopoverZoom(z) }
         anchors.fill: parent
         opened: root.correctionDraftWeightsPopoverOpen
         grid: root.correctionDraftGridId ? CompetencyGrids.findGrid(root.correctionDraftGridId) : null
@@ -8120,6 +9036,8 @@ Item {
       }
 
       CriteriaWeightsPopover {
+        zoom: root.popoverZoom
+        onZoomChangeRequested: function(z) { root.setPopoverZoom(z) }
         anchors.fill: parent
         opened: root.evaluationWeightsPopoverOpen
         grid: root.activeEvaluationGrid()
@@ -8157,6 +9075,7 @@ Item {
         onCanceled: root.cancelEvalCommentBankPopover()
         onCommentPicked: function(entry) { root.insertEvalCommentFromBank(entry) }
         onDeleteConfirmed: function(id) { root.deleteEvalCommentsBankEntry(id) }
+        onEditConfirmed: function(id, text) { root.editEvalCommentsBankEntry(id, text) }
       }
 
       ConfirmDialog {

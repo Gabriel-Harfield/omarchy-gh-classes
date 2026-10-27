@@ -15,6 +15,9 @@ Item {
   id: root
 
   property bool opened: false
+  // Popover zoom (shared, persisted by Panel.qml).
+  property real zoom: 1.0
+  signal zoomChangeRequested(real zoom)
   property string studentLabel: ""
   property string status: "idle" // idle | running | done | error
   property string log: ""
@@ -148,290 +151,334 @@ Item {
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-        Column {
-          width: card.width - card.contentLeftInset - card.contentRightInset
-          spacing: Style.spacing.lg
+        // Gabriel, 2026-10-21: popover-local zoom (the panel-wide one does not
+        // reach popovers) — same scale-transform trick as Panel.qml's
+        // zoomWrapper; the wrapper reports the REAL scaled size to the ScrollView.
+        Item {
+          id: zoomWrapper
+          width: zoomColumn.width * root.zoom
+          height: zoomColumn.height * root.zoom
+          implicitWidth: width
+          implicitHeight: height
 
-          Text {
-            text: "Log — " + root.studentLabel
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            wrapMode: Text.WordWrap
-            width: parent.width
-            textFormat: Text.PlainText
-          }
+          Column {
+            id: zoomColumn
+            width: (card.width - card.contentLeftInset - card.contentRightInset) / root.zoom
+            scale: root.zoom
+            transformOrigin: Item.TopLeft
+            spacing: Style.spacing.lg
 
-          Button {
-            text: "👁 Voir la copie"
-            bordered: true
-            enabled: root.copyPath !== ""
-            foreground: root.foreground
-            accent: root.accent
-            onClicked: root.copyOpenRequested()
-          }
+            Row {
+              layoutDirection: Qt.RightToLeft
+              width: parent.width
+              spacing: Style.spacing.xs
 
-          // ---- simple status line: error / running / not-done / RAS, or
-          // the raw text of an older log that predates the itemized format
-          Rectangle {
-            visible: !root.hasItemizedLog
-            width: parent.width
-            height: bodyTextItem.implicitHeight + Style.space(16)
-            radius: Style.cornerRadius
-            color: Qt.rgba(root.bodyColor().r, root.bodyColor().g, root.bodyColor().b, 0.08)
-            border.color: Qt.rgba(root.bodyColor().r, root.bodyColor().g, root.bodyColor().b, 0.35)
-            border.width: 1
+              Button {
+                text: "+"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom + 0.1)
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(44)
+                horizontalAlignment: Text.AlignHCenter
+                text: Math.round(root.zoom * 100) + "%"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Button {
+                text: "−"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom - 0.1)
+              }
+            }
 
             Text {
-              id: bodyTextItem
-              anchors.left: parent.left
-              anchors.right: parent.right
-              anchors.top: parent.top
-              anchors.margins: Style.space(10)
-              text: root.bodyText()
-              color: root.bodyColor()
+              text: "Log — " + root.studentLabel
+              color: root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.body
+              font.pixelSize: Style.font.title
+              font.bold: true
               wrapMode: Text.WordWrap
+              width: parent.width
               textFormat: Text.PlainText
             }
-          }
 
-          // ---- itemized log: one block per point, each individually
-          // validated / ignored / commented
-          Column {
-            visible: root.hasItemizedLog
-            width: parent.width
-            spacing: Style.spacing.md
+            Button {
+              text: "👁 Voir la copie"
+              bordered: true
+              enabled: root.copyPath !== ""
+              foreground: root.foreground
+              accent: root.accent
+              onClicked: root.copyOpenRequested()
+            }
 
-            Text { text: "Points relevés"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+            // ---- simple status line: error / running / not-done / RAS, or
+            // the raw text of an older log that predates the itemized format
+            Rectangle {
+              visible: !root.hasItemizedLog
+              width: parent.width
+              height: bodyTextItem.implicitHeight + Style.space(16)
+              radius: Style.cornerRadius
+              color: Qt.rgba(root.bodyColor().r, root.bodyColor().g, root.bodyColor().b, 0.08)
+              border.color: Qt.rgba(root.bodyColor().r, root.bodyColor().g, root.bodyColor().b, 0.35)
+              border.width: 1
 
-            Repeater {
-              model: root.logItems
-              delegate: Column {
-                id: logItemRow
-                required property string modelData
-                required property int index
-                width: parent.width
-                spacing: Style.spacing.xs
+              Text {
+                id: bodyTextItem
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: Style.space(10)
+                text: root.bodyText()
+                color: root.bodyColor()
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+              }
+            }
 
-                readonly property var itemState: root.itemStateFor(logItemRow.index)
-                readonly property color itemColor: root.itemColorFor(logItemRow.index)
-                property bool commentOpen: false
+            // ---- itemized log: one block per point, each individually
+            // validated / ignored / commented
+            Column {
+              visible: root.hasItemizedLog
+              width: parent.width
+              spacing: Style.spacing.md
 
-                Rectangle {
+              Text { text: "Points relevés"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+
+              Repeater {
+                model: root.logItems
+                delegate: Column {
+                  id: logItemRow
+                  required property string modelData
+                  required property int index
                   width: parent.width
-                  height: itemText.implicitHeight + Style.space(16)
-                  radius: Style.cornerRadius
-                  color: Qt.rgba(logItemRow.itemColor.r, logItemRow.itemColor.g, logItemRow.itemColor.b, 0.08)
-                  border.color: Qt.rgba(logItemRow.itemColor.r, logItemRow.itemColor.g, logItemRow.itemColor.b, 0.35)
-                  border.width: 1
+                  spacing: Style.spacing.xs
 
-                  Text {
-                    id: itemText
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    anchors.margins: Style.space(10)
-                    text: "• " + logItemRow.modelData
-                    color: logItemRow.itemColor
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.body
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                  }
-                }
+                  readonly property var itemState: root.itemStateFor(logItemRow.index)
+                  readonly property color itemColor: root.itemColorFor(logItemRow.index)
+                  property bool commentOpen: false
 
-                Flow {
-                  width: parent.width
-                  spacing: Style.spacing.controlGap
-                  Button {
-                    text: logItemRow.itemState.status === "validated" ? "✔ Validé" : "✔ Valider"
-                    bordered: true
-                    foreground: root.foreground
-                    accent: root.accent
-                    onClicked: { logItemRow.commentOpen = false; root.logItemStatusChanged(logItemRow.index, "validated", "") }
-                  }
-                  Button {
-                    text: logItemRow.itemState.status === "ignored" ? "🚫 Ignoré" : "🚫 Ignorer"
-                    bordered: true
-                    foreground: root.foreground
-                    accent: root.accent
-                    onClicked: { logItemRow.commentOpen = false; root.logItemStatusChanged(logItemRow.index, "ignored", "") }
-                  }
-                  Button {
-                    text: "💬 Commenter"
-                    bordered: true
-                    foreground: root.foreground
-                    accent: logItemRow.itemState.status === "commented" ? root.warningColor : root.accent
-                    onClicked: logItemRow.commentOpen = !logItemRow.commentOpen
-                  }
-                }
-
-                Column {
-                  visible: logItemRow.commentOpen || logItemRow.itemState.status === "commented"
-                  width: parent.width
-                  spacing: Style.spacing.xxs
-                  TextField {
-                    id: itemCommentField
+                  Rectangle {
                     width: parent.width
-                    text: logItemRow.itemState.comment
-                    placeholderText: "Instruction pour l'agent sur ce point précis…"
-                    foreground: root.foreground
-                    accent: root.accent
-                    maximumLength: 500
+                    height: itemText.implicitHeight + Style.space(16)
+                    radius: Style.cornerRadius
+                    color: Qt.rgba(logItemRow.itemColor.r, logItemRow.itemColor.g, logItemRow.itemColor.b, 0.08)
+                    border.color: Qt.rgba(logItemRow.itemColor.r, logItemRow.itemColor.g, logItemRow.itemColor.b, 0.35)
+                    border.width: 1
+
+                    Text {
+                      id: itemText
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.top: parent.top
+                      anchors.margins: Style.space(10)
+                      text: "• " + logItemRow.modelData
+                      color: logItemRow.itemColor
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      wrapMode: Text.WordWrap
+                      textFormat: Text.PlainText
+                    }
                   }
-                  Button {
-                    text: "Enregistrer ce commentaire"
-                    bordered: true
-                    enabled: itemCommentField.text.trim() !== ""
-                    foreground: root.foreground
-                    accent: root.accent
-                    onClicked: {
-                      root.logItemStatusChanged(logItemRow.index, "commented", itemCommentField.text.trim())
-                      logItemRow.commentOpen = false
+
+                  Flow {
+                    width: parent.width
+                    spacing: Style.spacing.controlGap
+                    Button {
+                      text: logItemRow.itemState.status === "validated" ? "✔ Validé" : "✔ Valider"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: { logItemRow.commentOpen = false; root.logItemStatusChanged(logItemRow.index, "validated", "") }
+                    }
+                    Button {
+                      text: logItemRow.itemState.status === "ignored" ? "🚫 Ignoré" : "🚫 Ignorer"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: { logItemRow.commentOpen = false; root.logItemStatusChanged(logItemRow.index, "ignored", "") }
+                    }
+                    Button {
+                      text: "💬 Commenter"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: logItemRow.itemState.status === "commented" ? root.warningColor : root.accent
+                      onClicked: logItemRow.commentOpen = !logItemRow.commentOpen
+                    }
+                  }
+
+                  Column {
+                    visible: logItemRow.commentOpen || logItemRow.itemState.status === "commented"
+                    width: parent.width
+                    spacing: Style.spacing.xxs
+                    TextField {
+                      id: itemCommentField
+                      width: parent.width
+                      text: logItemRow.itemState.comment
+                      placeholderText: "Instruction pour l'agent sur ce point précis…"
+                      foreground: root.foreground
+                      accent: root.accent
+                      maximumLength: 500
+                    }
+                    Button {
+                      text: "Enregistrer ce commentaire"
+                      bordered: true
+                      enabled: itemCommentField.text.trim() !== ""
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: {
+                        root.logItemStatusChanged(logItemRow.index, "commented", itemCommentField.text.trim())
+                        logItemRow.commentOpen = false
+                      }
                     }
                   }
                 }
               }
             }
-          }
 
-          Column {
-            visible: root.status === "done"
-            width: parent.width
-            spacing: Style.spacing.xxs
-
-            Row {
-              width: parent.width
-              spacing: Style.spacing.controlGap
-              Text { anchors.verticalCenter: parent.verticalCenter; text: "Appréciation"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-              Button {
-                anchors.verticalCenter: parent.verticalCenter
-                text: "🔍 Agrandir"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                onClicked: {
-                  expandField.text = appreciationField.text
-                  root.expandOpen = true
-                }
-              }
-            }
-            Rectangle {
-              width: parent.width
-              height: Style.space(96)
-              radius: Style.cornerRadius
-              color: Style.normalFillFor(root.foreground, root.accent)
-              border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-              border.width: 1
-              ScrollView {
-                anchors.fill: parent
-                anchors.margins: Style.space(6)
-                clip: true
-                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                TextArea {
-                  id: appreciationField
-                  wrapMode: TextArea.Wrap
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  background: null
-                  placeholderText: "Corriger le texte de l'appréciation à la main…"
-                }
-              }
-            }
-            Row {
-              spacing: Style.spacing.controlGap
-              Button {
-                text: "💾 Enregistrer l'appréciation"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                onClicked: root.appreciationSaved(appreciationField.text)
-              }
-              Button {
-                text: root.reformulating ? "✨ Reformulation en cours…" : "✨ Reformuler à partir des commentaires"
-                bordered: true
-                // The shared Button component has no built-in visual state for
-                // `enabled: false` (no dimming) — without this, a disabled
-                // button looks identical to an active one and a click on it
-                // silently does nothing. Dim it by hand so "no commented item
-                // yet" is visible at a glance instead of looking like a bug.
-                enabled: !root.reformulating && root.hasCommentedItems()
-                foreground: (!root.reformulating && root.hasCommentedItems()) ? root.foreground : Qt.darker(root.foreground, 1.7)
-                accent: (!root.reformulating && root.hasCommentedItems()) ? root.accent : Qt.darker(root.foreground, 1.7)
-                onClicked: root.reformulateRequested()
-              }
-            }
-          }
-
-          Column {
-            visible: root.status === "done" || root.status === "error"
-            width: parent.width
-            spacing: Style.spacing.xxs
-
-            Text { text: "Complément pour l'agent (usage unique, à la prochaine correction complète)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-            Rectangle {
-              width: parent.width
-              height: Style.space(72)
-              radius: Style.cornerRadius
-              color: Style.normalFillFor(root.foreground, root.accent)
-              border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-              border.width: 1
-              ScrollView {
-                anchors.fill: parent
-                anchors.margins: Style.space(6)
-                clip: true
-                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                TextArea {
-                  id: addendumField
-                  wrapMode: TextArea.Wrap
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  background: null
-                  placeholderText: "Ex. \"le mot que tu lis comme X est en fait Y\"…"
-                }
-              }
-            }
-            Row {
-              spacing: Style.spacing.controlGap
-              Button {
-                text: "💾 Enregistrer"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                onClicked: root.addendumSaved(addendumField.text)
-              }
-              Button {
-                text: "🔁 Recorriger entièrement avec ce complément"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                onClicked: root.recorrectRequested(addendumField.text)
-              }
-            }
-          }
-
-          Row {
-            spacing: Style.spacing.controlGap
-
-            Button {
+            Column {
               visible: root.status === "done"
-              text: root.reviewed ? "✔ Vérifié" : "☐ Marquer comme vérifié"
-              bordered: true
-              foreground: root.foreground
-              accent: root.accent
-              onClicked: root.reviewedToggled()
+              width: parent.width
+              spacing: Style.spacing.xxs
+
+              Row {
+                width: parent.width
+                spacing: Style.spacing.controlGap
+                Text { anchors.verticalCenter: parent.verticalCenter; text: "Appréciation"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                Button {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "🔍 Agrandir"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: {
+                    expandField.text = appreciationField.text
+                    root.expandOpen = true
+                  }
+                }
+              }
+              Rectangle {
+                width: parent.width
+                height: Style.space(96)
+                radius: Style.cornerRadius
+                color: Style.normalFillFor(root.foreground, root.accent)
+                border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                border.width: 1
+                ScrollView {
+                  anchors.fill: parent
+                  anchors.margins: Style.space(6)
+                  clip: true
+                  ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                  TextArea {
+                    id: appreciationField
+                    wrapMode: TextArea.Wrap
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    background: null
+                    placeholderText: "Corriger le texte de l'appréciation à la main…"
+                  }
+                }
+              }
+              Row {
+                spacing: Style.spacing.controlGap
+                Button {
+                  text: "💾 Enregistrer l'appréciation"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.appreciationSaved(appreciationField.text)
+                }
+                Button {
+                  text: root.reformulating ? "✨ Reformulation en cours…" : "✨ Reformuler à partir des commentaires"
+                  bordered: true
+                  // The shared Button component has no built-in visual state for
+                  // `enabled: false` (no dimming) — without this, a disabled
+                  // button looks identical to an active one and a click on it
+                  // silently does nothing. Dim it by hand so "no commented item
+                  // yet" is visible at a glance instead of looking like a bug.
+                  enabled: !root.reformulating && root.hasCommentedItems()
+                  foreground: (!root.reformulating && root.hasCommentedItems()) ? root.foreground : Qt.darker(root.foreground, 1.7)
+                  accent: (!root.reformulating && root.hasCommentedItems()) ? root.accent : Qt.darker(root.foreground, 1.7)
+                  onClicked: root.reformulateRequested()
+                }
+              }
             }
-            Button {
-              text: "Fermer"
-              bordered: true
-              foreground: root.foreground
-              accent: root.accent
-              onClicked: root.canceled()
+
+            Column {
+              visible: root.status === "done" || root.status === "error"
+              width: parent.width
+              spacing: Style.spacing.xxs
+
+              Text { text: "Complément pour l'agent (usage unique, à la prochaine correction complète)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+              Rectangle {
+                width: parent.width
+                height: Style.space(72)
+                radius: Style.cornerRadius
+                color: Style.normalFillFor(root.foreground, root.accent)
+                border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                border.width: 1
+                ScrollView {
+                  anchors.fill: parent
+                  anchors.margins: Style.space(6)
+                  clip: true
+                  ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                  TextArea {
+                    id: addendumField
+                    wrapMode: TextArea.Wrap
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    background: null
+                    placeholderText: "Ex. \"le mot que tu lis comme X est en fait Y\"…"
+                  }
+                }
+              }
+              Row {
+                spacing: Style.spacing.controlGap
+                Button {
+                  text: "💾 Enregistrer"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.addendumSaved(addendumField.text)
+                }
+                Button {
+                  text: "🔁 Recorriger entièrement avec ce complément"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.recorrectRequested(addendumField.text)
+                }
+              }
+            }
+
+            Row {
+              spacing: Style.spacing.controlGap
+
+              Button {
+                visible: root.status === "done"
+                text: root.reviewed ? "✔ Vérifié" : "☐ Marquer comme vérifié"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.reviewedToggled()
+              }
+              Button {
+                text: "Fermer"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.canceled()
+              }
             }
           }
         }

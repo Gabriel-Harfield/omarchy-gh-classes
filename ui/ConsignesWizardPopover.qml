@@ -27,6 +27,9 @@ Item {
   id: root
 
   property bool opened: false
+  // Popover zoom (shared, persisted by Panel.qml).
+  property real zoom: 1.0
+  signal zoomChangeRequested(real zoom)
   property string initialPath: ""
   property color foreground: Color.foreground
   property color background: Color.background
@@ -213,321 +216,365 @@ Item {
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-        Column {
-          width: card.width - card.contentLeftInset - card.contentRightInset
-          spacing: Style.spacing.lg
+        // Gabriel, 2026-10-21: popover-local zoom (the panel-wide one does not
+        // reach popovers) — same scale-transform trick as Panel.qml's
+        // zoomWrapper; the wrapper reports the REAL scaled size to the ScrollView.
+        Item {
+          id: zoomWrapper
+          width: zoomColumn.width * root.zoom
+          height: zoomColumn.height * root.zoom
+          implicitWidth: width
+          implicitHeight: height
 
-          Text {
-            text: "Assistant — Consignes"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-          }
-
-          Text {
-            width: parent.width
-            text: "Structure fixe : paramètres de l'évaluation, cadre du devoir, puis des critères classés sous Méthode / Contenu / Expression écrite — l'agent produit son appréciation dans ce même ordre."
-            color: Qt.darker(root.foreground, 1.4)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          PanelSeparator { foreground: root.foreground; width: parent.width }
-
-          // ---- Paramètres de l'évaluation ----
           Column {
-            width: parent.width
-            spacing: Style.spacing.md
-            Text { text: "Paramètres de l'évaluation"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+            id: zoomColumn
+            width: (card.width - card.contentLeftInset - card.contentRightInset) / root.zoom
+            scale: root.zoom
+            transformOrigin: Item.TopLeft
+            spacing: Style.spacing.lg
 
-            Dropdown {
+            Row {
+              layoutDirection: Qt.RightToLeft
               width: parent.width
-              label: "Nature de l'évaluation"
-              options: root.natureOptions
-              value: root.paramNature
-              foreground: root.foreground
-              background: root.background
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onChanged: function(v) { root.paramNature = v }
+              spacing: Style.spacing.xs
+
+              Button {
+                text: "+"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom + 0.1)
+              }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(44)
+                horizontalAlignment: Text.AlignHCenter
+                text: Math.round(root.zoom * 100) + "%"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+              Button {
+                text: "−"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom - 0.1)
+              }
             }
 
-            Dropdown {
+            Text {
+              text: "Assistant — Consignes"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+
+            Text {
               width: parent.width
-              label: "Type d'évaluation"
-              options: root.typeOptions
-              value: root.paramType
-              foreground: root.foreground
-              background: root.background
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onChanged: function(v) { root.paramType = v }
+              text: "Structure fixe : paramètres de l'évaluation, cadre du devoir, puis des critères classés sous Méthode / Contenu / Expression écrite — l'agent produit son appréciation dans ce même ordre."
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
             }
 
-            NumberField {
-              label: "Durée de l'épreuve (minutes)"
-              value: root.paramDuree
-              from: 5
-              to: 600
-              stepSize: 5
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onModified: function(v) { root.paramDuree = v }
+            PanelSeparator { foreground: root.foreground; width: parent.width }
+
+            // ---- Paramètres de l'évaluation ----
+            Column {
+              width: parent.width
+              spacing: Style.spacing.md
+              Text { text: "Paramètres de l'évaluation"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+
+              Dropdown {
+                width: parent.width
+                label: "Nature de l'évaluation"
+                options: root.natureOptions
+                value: root.paramNature
+                foreground: root.foreground
+                background: root.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onChanged: function(v) { root.paramNature = v }
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Type d'évaluation"
+                options: root.typeOptions
+                value: root.paramType
+                foreground: root.foreground
+                background: root.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onChanged: function(v) { root.paramType = v }
+              }
+
+              NumberField {
+                label: "Durée de l'épreuve (minutes)"
+                value: root.paramDuree
+                from: 5
+                to: 600
+                stepSize: 5
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onModified: function(v) { root.paramDuree = v }
+              }
+
+              Column {
+                width: parent.width
+                spacing: Style.spacing.xxs
+                Text { text: "Niveau de bienveillance : " + root.paramBienveillance + "/10"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                PanelSlider {
+                  width: parent.width
+                  bar: null
+                  minimum: 0
+                  maximum: 10
+                  integer: true
+                  value: root.paramBienveillance
+                  onMoved: function(v) { root.paramBienveillance = v }
+                }
+              }
+
+              Toggle {
+                width: parent.width
+                label: "Prise de notes acceptée"
+                description: "Sinon, une rédaction complète est exigée."
+                checked: root.paramNotesAcceptees
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onClicked: root.paramNotesAcceptees = !root.paramNotesAcceptees
+              }
+
+              Toggle {
+                width: parent.width
+                label: "Sujet à traiter intégralement"
+                description: "Coché = une copie incomplète doit être signalée comme telle."
+                checked: root.paramCompletudeExigee
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onClicked: root.paramCompletudeExigee = !root.paramCompletudeExigee
+              }
+
+              Column {
+                width: parent.width
+                spacing: Style.spacing.xxs
+                Text { text: "Écart sévère / bienveillante : " + root.paramEcart.toFixed(1) + " pts (neutre = moyenne)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                PanelSlider {
+                  width: parent.width
+                  bar: null
+                  minimum: 0.5
+                  maximum: 3
+                  step: 0.5
+                  value: root.paramEcart
+                  onMoved: function(v) { root.paramEcart = Math.round(v * 2) / 2 }
+                }
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Niveau de surinterprétation"
+                options: root.surinterpretationOptions
+                value: root.paramSurinterpretation
+                foreground: root.foreground
+                background: root.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onChanged: function(v) { root.paramSurinterpretation = v }
+              }
+
+              Dropdown {
+                width: parent.width
+                label: "Niveau de détail de l'appréciation"
+                options: root.detailOptions
+                value: root.paramDetail
+                foreground: root.foreground
+                background: root.background
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onChanged: function(v) { root.paramDetail = v }
+              }
             }
 
+            PanelSeparator { foreground: root.foreground; width: parent.width }
+
+            // ---- Cadre du devoir ----
             Column {
               width: parent.width
               spacing: Style.spacing.xxs
-              Text { text: "Niveau de bienveillance : " + root.paramBienveillance + "/10"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-              PanelSlider {
+              Text { text: "Cadre du devoir"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+              Rectangle {
                 width: parent.width
-                bar: null
-                minimum: 0
-                maximum: 10
-                integer: true
-                value: root.paramBienveillance
-                onMoved: function(v) { root.paramBienveillance = v }
+                height: Style.space(88)
+                radius: Style.cornerRadius
+                color: Style.normalFillFor(root.foreground, root.accent)
+                border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                border.width: 1
+                ScrollView {
+                  anchors.fill: parent
+                  anchors.margins: Style.space(6)
+                  clip: true
+                  ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                  TextArea {
+                    id: cadreField
+                    wrapMode: TextArea.Wrap
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    background: null
+                    placeholderText: "Contexte, niveau, attentes générales…"
+                    onTextChanged: root.cadre = text
+                  }
+                }
               }
             }
 
-            Toggle {
+            PanelSeparator { foreground: root.foreground; width: parent.width }
+
+            // ---- Méthode ----
+            Column {
               width: parent.width
-              label: "Prise de notes acceptée"
-              description: "Sinon, une rédaction complète est exigée."
-              checked: root.paramNotesAcceptees
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onClicked: root.paramNotesAcceptees = !root.paramNotesAcceptees
+              spacing: Style.spacing.xs
+              Text { text: "Méthode"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+              Repeater {
+                model: root.methodeCriteria
+                delegate: Item {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  height: Math.max(mLabel.implicitHeight, mRemove.implicitHeight)
+                  Text { id: mLabel; anchors.left: parent.left; anchors.right: mRemove.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; text: "• " + modelData; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+                  Button { id: mRemove; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "✕"; bordered: true; foreground: root.foreground; accent: Color.urgent; onClicked: root.removeCriterion("methode", index) }
+                }
+              }
+              Item {
+                width: parent.width
+                height: Math.max(newMethodeField.implicitHeight, addMethodeButton.implicitHeight)
+                TextField { id: newMethodeField; anchors.left: parent.left; anchors.right: addMethodeButton.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; placeholderText: "Nouveau critère…"; foreground: root.foreground; accent: root.accent; maximumLength: 200 }
+                Button { id: addMethodeButton; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "+ Ajouter"; bordered: true; enabled: newMethodeField.text.trim() !== ""; foreground: root.foreground; accent: root.accent; onClicked: { root.addCriterion("methode", newMethodeField.text); newMethodeField.text = "" } }
+              }
             }
 
-            Toggle {
+            // ---- Contenu ----
+            Column {
               width: parent.width
-              label: "Sujet à traiter intégralement"
-              description: "Coché = une copie incomplète doit être signalée comme telle."
-              checked: root.paramCompletudeExigee
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onClicked: root.paramCompletudeExigee = !root.paramCompletudeExigee
+              spacing: Style.spacing.xs
+              Text { text: "Contenu"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+              Repeater {
+                model: root.contenuCriteria
+                delegate: Item {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  height: Math.max(cLabel.implicitHeight, cRemove.implicitHeight)
+                  Text { id: cLabel; anchors.left: parent.left; anchors.right: cRemove.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; text: "• " + modelData; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+                  Button { id: cRemove; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "✕"; bordered: true; foreground: root.foreground; accent: Color.urgent; onClicked: root.removeCriterion("contenu", index) }
+                }
+              }
+              Item {
+                width: parent.width
+                height: Math.max(newContenuField.implicitHeight, addContenuButton.implicitHeight)
+                TextField { id: newContenuField; anchors.left: parent.left; anchors.right: addContenuButton.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; placeholderText: "Nouveau critère…"; foreground: root.foreground; accent: root.accent; maximumLength: 200 }
+                Button { id: addContenuButton; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "+ Ajouter"; bordered: true; enabled: newContenuField.text.trim() !== ""; foreground: root.foreground; accent: root.accent; onClicked: { root.addCriterion("contenu", newContenuField.text); newContenuField.text = "" } }
+              }
             }
 
+            // ---- Expression écrite ----
+            Column {
+              width: parent.width
+              spacing: Style.spacing.xs
+              Text { text: "Expression écrite"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+              Repeater {
+                model: root.expressionCriteria
+                delegate: Item {
+                  required property var modelData
+                  required property int index
+                  width: parent.width
+                  height: Math.max(eLabel.implicitHeight, eRemove.implicitHeight)
+                  Text { id: eLabel; anchors.left: parent.left; anchors.right: eRemove.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; text: "• " + modelData; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
+                  Button { id: eRemove; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "✕"; bordered: true; foreground: root.foreground; accent: Color.urgent; onClicked: root.removeCriterion("expression", index) }
+                }
+              }
+              Item {
+                width: parent.width
+                height: Math.max(newExpressionField.implicitHeight, addExpressionButton.implicitHeight)
+                TextField { id: newExpressionField; anchors.left: parent.left; anchors.right: addExpressionButton.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; placeholderText: "Nouveau critère…"; foreground: root.foreground; accent: root.accent; maximumLength: 200 }
+                Button { id: addExpressionButton; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "+ Ajouter"; bordered: true; enabled: newExpressionField.text.trim() !== ""; foreground: root.foreground; accent: root.accent; onClicked: { root.addCriterion("expression", newExpressionField.text); newExpressionField.text = "" } }
+              }
+            }
+
+            PanelSeparator { foreground: root.foreground; width: parent.width }
+
+            // ---- Barème indicatif (optionnel) ----
             Column {
               width: parent.width
               spacing: Style.spacing.xxs
-              Text { text: "Écart sévère / bienveillante : " + root.paramEcart.toFixed(1) + " pts (neutre = moyenne)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-              PanelSlider {
+              Text { text: "Barème indicatif (optionnel)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+              Rectangle {
                 width: parent.width
-                bar: null
-                minimum: 0.5
-                maximum: 3
-                step: 0.5
-                value: root.paramEcart
-                onMoved: function(v) { root.paramEcart = Math.round(v * 2) / 2 }
-              }
-            }
-
-            Dropdown {
-              width: parent.width
-              label: "Niveau de surinterprétation"
-              options: root.surinterpretationOptions
-              value: root.paramSurinterpretation
-              foreground: root.foreground
-              background: root.background
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onChanged: function(v) { root.paramSurinterpretation = v }
-            }
-
-            Dropdown {
-              width: parent.width
-              label: "Niveau de détail de l'appréciation"
-              options: root.detailOptions
-              value: root.paramDetail
-              foreground: root.foreground
-              background: root.background
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onChanged: function(v) { root.paramDetail = v }
-            }
-          }
-
-          PanelSeparator { foreground: root.foreground; width: parent.width }
-
-          // ---- Cadre du devoir ----
-          Column {
-            width: parent.width
-            spacing: Style.spacing.xxs
-            Text { text: "Cadre du devoir"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-            Rectangle {
-              width: parent.width
-              height: Style.space(88)
-              radius: Style.cornerRadius
-              color: Style.normalFillFor(root.foreground, root.accent)
-              border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-              border.width: 1
-              ScrollView {
-                anchors.fill: parent
-                anchors.margins: Style.space(6)
-                clip: true
-                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                TextArea {
-                  id: cadreField
-                  wrapMode: TextArea.Wrap
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  background: null
-                  placeholderText: "Contexte, niveau, attentes générales…"
-                  onTextChanged: root.cadre = text
+                height: Style.space(64)
+                radius: Style.cornerRadius
+                color: Style.normalFillFor(root.foreground, root.accent)
+                border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                border.width: 1
+                ScrollView {
+                  anchors.fill: parent
+                  anchors.margins: Style.space(6)
+                  clip: true
+                  ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                  TextArea {
+                    id: baremeField
+                    wrapMode: TextArea.Wrap
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    background: null
+                    placeholderText: "Paliers indicatifs, jamais appliqués mécaniquement…"
+                    onTextChanged: root.bareme = text
+                  }
                 }
               }
             }
-          }
 
-          PanelSeparator { foreground: root.foreground; width: parent.width }
+            PanelSeparator { foreground: root.foreground; width: parent.width }
 
-          // ---- Méthode ----
-          Column {
-            width: parent.width
-            spacing: Style.spacing.xs
-            Text { text: "Méthode"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
-            Repeater {
-              model: root.methodeCriteria
-              delegate: Item {
-                required property var modelData
-                required property int index
+            // ---- destination + actions ----
+            Column {
+              width: parent.width
+              spacing: Style.spacing.xxs
+              Text { text: "Enregistrer sous (.md)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+              TextField {
+                id: savePathField
                 width: parent.width
-                height: Math.max(mLabel.implicitHeight, mRemove.implicitHeight)
-                Text { id: mLabel; anchors.left: parent.left; anchors.right: mRemove.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; text: "• " + modelData; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
-                Button { id: mRemove; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "✕"; bordered: true; foreground: root.foreground; accent: Color.urgent; onClicked: root.removeCriterion("methode", index) }
+                placeholderText: "chemin du fichier .md…"
+                foreground: root.foreground
+                accent: root.accent
+                maximumLength: 2000
               }
             }
-            Item {
-              width: parent.width
-              height: Math.max(newMethodeField.implicitHeight, addMethodeButton.implicitHeight)
-              TextField { id: newMethodeField; anchors.left: parent.left; anchors.right: addMethodeButton.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; placeholderText: "Nouveau critère…"; foreground: root.foreground; accent: root.accent; maximumLength: 200 }
-              Button { id: addMethodeButton; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "+ Ajouter"; bordered: true; enabled: newMethodeField.text.trim() !== ""; foreground: root.foreground; accent: root.accent; onClicked: { root.addCriterion("methode", newMethodeField.text); newMethodeField.text = "" } }
-            }
-          }
 
-          // ---- Contenu ----
-          Column {
-            width: parent.width
-            spacing: Style.spacing.xs
-            Text { text: "Contenu"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
-            Repeater {
-              model: root.contenuCriteria
-              delegate: Item {
-                required property var modelData
-                required property int index
-                width: parent.width
-                height: Math.max(cLabel.implicitHeight, cRemove.implicitHeight)
-                Text { id: cLabel; anchors.left: parent.left; anchors.right: cRemove.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; text: "• " + modelData; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
-                Button { id: cRemove; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "✕"; bordered: true; foreground: root.foreground; accent: Color.urgent; onClicked: root.removeCriterion("contenu", index) }
+            Row {
+              spacing: Style.spacing.controlGap
+              Button {
+                text: "🪄 Générer et enregistrer"
+                bordered: true
+                enabled: root.canGenerate
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.generateRequested(savePathField.text.trim(), root.buildMarkdown())
               }
-            }
-            Item {
-              width: parent.width
-              height: Math.max(newContenuField.implicitHeight, addContenuButton.implicitHeight)
-              TextField { id: newContenuField; anchors.left: parent.left; anchors.right: addContenuButton.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; placeholderText: "Nouveau critère…"; foreground: root.foreground; accent: root.accent; maximumLength: 200 }
-              Button { id: addContenuButton; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "+ Ajouter"; bordered: true; enabled: newContenuField.text.trim() !== ""; foreground: root.foreground; accent: root.accent; onClicked: { root.addCriterion("contenu", newContenuField.text); newContenuField.text = "" } }
-            }
-          }
-
-          // ---- Expression écrite ----
-          Column {
-            width: parent.width
-            spacing: Style.spacing.xs
-            Text { text: "Expression écrite"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
-            Repeater {
-              model: root.expressionCriteria
-              delegate: Item {
-                required property var modelData
-                required property int index
-                width: parent.width
-                height: Math.max(eLabel.implicitHeight, eRemove.implicitHeight)
-                Text { id: eLabel; anchors.left: parent.left; anchors.right: eRemove.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; text: "• " + modelData; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; wrapMode: Text.WordWrap; textFormat: Text.PlainText }
-                Button { id: eRemove; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "✕"; bordered: true; foreground: root.foreground; accent: Color.urgent; onClicked: root.removeCriterion("expression", index) }
+              Button {
+                text: "Fermer"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.canceled()
               }
-            }
-            Item {
-              width: parent.width
-              height: Math.max(newExpressionField.implicitHeight, addExpressionButton.implicitHeight)
-              TextField { id: newExpressionField; anchors.left: parent.left; anchors.right: addExpressionButton.left; anchors.rightMargin: Style.spacing.controlGap; anchors.verticalCenter: parent.verticalCenter; placeholderText: "Nouveau critère…"; foreground: root.foreground; accent: root.accent; maximumLength: 200 }
-              Button { id: addExpressionButton; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: "+ Ajouter"; bordered: true; enabled: newExpressionField.text.trim() !== ""; foreground: root.foreground; accent: root.accent; onClicked: { root.addCriterion("expression", newExpressionField.text); newExpressionField.text = "" } }
-            }
-          }
-
-          PanelSeparator { foreground: root.foreground; width: parent.width }
-
-          // ---- Barème indicatif (optionnel) ----
-          Column {
-            width: parent.width
-            spacing: Style.spacing.xxs
-            Text { text: "Barème indicatif (optionnel)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-            Rectangle {
-              width: parent.width
-              height: Style.space(64)
-              radius: Style.cornerRadius
-              color: Style.normalFillFor(root.foreground, root.accent)
-              border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-              border.width: 1
-              ScrollView {
-                anchors.fill: parent
-                anchors.margins: Style.space(6)
-                clip: true
-                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                TextArea {
-                  id: baremeField
-                  wrapMode: TextArea.Wrap
-                  color: root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  background: null
-                  placeholderText: "Paliers indicatifs, jamais appliqués mécaniquement…"
-                  onTextChanged: root.bareme = text
-                }
-              }
-            }
-          }
-
-          PanelSeparator { foreground: root.foreground; width: parent.width }
-
-          // ---- destination + actions ----
-          Column {
-            width: parent.width
-            spacing: Style.spacing.xxs
-            Text { text: "Enregistrer sous (.md)"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-            TextField {
-              id: savePathField
-              width: parent.width
-              placeholderText: "chemin du fichier .md…"
-              foreground: root.foreground
-              accent: root.accent
-              maximumLength: 2000
-            }
-          }
-
-          Row {
-            spacing: Style.spacing.controlGap
-            Button {
-              text: "🪄 Générer et enregistrer"
-              bordered: true
-              enabled: root.canGenerate
-              foreground: root.foreground
-              accent: root.accent
-              onClicked: root.generateRequested(savePathField.text.trim(), root.buildMarkdown())
-            }
-            Button {
-              text: "Fermer"
-              bordered: true
-              foreground: root.foreground
-              accent: root.accent
-              onClicked: root.canceled()
             }
           }
         }

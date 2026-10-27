@@ -24,6 +24,9 @@ Item {
   id: root
 
   property bool opened: false
+  // Popover zoom (shared, persisted by Panel.qml).
+  property real zoom: 1.0
+  signal zoomChangeRequested(real zoom)
   property string studentLabel: ""
   property var columns: []          // [string] — les cases, de gauche à droite
   property var rows: []             // [{ text }]
@@ -103,285 +106,329 @@ Item {
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-        Column {
-          width: card.width - card.contentLeftInset - card.contentRightInset
-          spacing: Style.spacing.lg
-
-          Text {
-            text: "Questionnaire — " + root.studentLabel
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-            wrapMode: Text.WordWrap
-            width: parent.width
-            textFormat: Text.PlainText
-          }
-
-          Text {
-            visible: root.missingCount > 0
-            width: parent.width
-            text: "⚠ " + root.missingCount + " item(s) non coché(s) par l'agent — ils comptent 0 dans le total tant que vous ne les tranchez pas vous-même."
-            color: Color.urgent
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-            textFormat: Text.PlainText
-          }
-
-          Row {
-            spacing: Style.spacing.controlGap
-            Button {
-              text: "👁 Voir la copie"
-              bordered: true
-              enabled: root.copyPath !== ""
-              foreground: root.foreground
-              accent: root.accent
-              onClicked: root.copyOpenRequested()
-            }
-            Button {
-              text: root.onlyDoubts ? "👁 Tout afficher" : "🔎 Seulement les items à arbitrer"
-              bordered: true
-              foreground: root.foreground
-              accent: root.accent
-              onClicked: root.onlyDoubts = !root.onlyDoubts
-            }
-          }
+        // Gabriel, 2026-10-21: popover-local zoom (the panel-wide one does not
+        // reach popovers) — same scale-transform trick as Panel.qml's
+        // zoomWrapper; the wrapper reports the REAL scaled size to the ScrollView.
+        Item {
+          id: zoomWrapper
+          width: zoomColumn.width * root.zoom
+          height: zoomColumn.height * root.zoom
+          implicitWidth: width
+          implicitHeight: height
 
           Column {
-            id: table
-            visible: (root.rows || []).length > 0
-            width: parent.width
-            spacing: Style.spacing.sm
+            id: zoomColumn
+            width: (card.width - card.contentLeftInset - card.contentRightInset) / root.zoom
+            scale: root.zoom
+            transformOrigin: Item.TopLeft
+            spacing: Style.spacing.lg
 
             Row {
+              layoutDirection: Qt.RightToLeft
               width: parent.width
               spacing: Style.spacing.xs
 
+              Button {
+                text: "+"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom + 0.1)
+              }
               Text {
-                width: parent.width - root.cellsTotalWidth
-                text: "Items — cliquez une case pour la changer"
-                font.bold: true
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(44)
+                horizontalAlignment: Text.AlignHCenter
+                text: Math.round(root.zoom * 100) + "%"
                 color: root.foreground
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+                font.pixelSize: Style.font.body
               }
-              Repeater {
-                model: root.columns
-                delegate: Column {
-                  id: headerCell
-                  required property string modelData
-                  required property int index
-                  width: root.cellColWidth
-                  Text {
-                    width: parent.width
-                    text: headerCell.modelData
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
-                    font.bold: true
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    textFormat: Text.PlainText
-                  }
-                  Text {
-                    width: parent.width
-                    text: QuestionnaireGrid.columnPointsLabel(headerCell.index, root.columnCount) + " pt"
-                    horizontalAlignment: Text.AlignHCenter
-                    color: Qt.darker(root.foreground, 1.5)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                }
+              Button {
+                text: "−"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom - 0.1)
               }
             }
-
-            Repeater {
-              model: root.rows
-              delegate: Column {
-                id: rowRoot
-                required property var modelData
-                required property int index
-                width: table.width
-                spacing: Style.spacing.xxs
-                visible: !root.onlyDoubts || root.rowNeedsAttention(rowRoot.index)
-
-                readonly property string doubt: String(root.doubts[String(rowRoot.index)] || "").trim()
-                readonly property string answer: String(root.answers[String(rowRoot.index)] || "").trim()
-                readonly property bool unchecked: root.checks[String(rowRoot.index)] === undefined
-
-                Row {
-                  width: parent.width
-                  spacing: Style.spacing.xs
-
-                  Text {
-                    width: parent.width - root.cellsTotalWidth
-                    text: (rowRoot.index + 1) + ".  " + QuestionnaireGrid.plainLabel(rowRoot.modelData.text)
-                    color: rowRoot.unchecked ? Color.urgent : root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                  }
-
-                  Repeater {
-                    model: root.columnCount
-                    delegate: Rectangle {
-                      id: cell
-                      required property int index
-                      width: root.cellColWidth
-                      height: Style.space(26)
-                      radius: Style.cornerRadius
-                      property bool checked: root.checks[String(rowRoot.index)] === cell.index
-                      color: cell.checked
-                        ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
-                        : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
-                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-                      border.width: 1
-
-                      Text {
-                        anchors.centerIn: parent
-                        text: cell.checked ? "X" : ""
-                        font.bold: true
-                        color: root.accent
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                      }
-
-                      MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.checkChanged(rowRoot.index, cell.index)
-                      }
-                    }
-                  }
-                }
-
-                // Ce que l'agent dit avoir lu sur la copie — la seule
-                // façon de vérifier une case sans rouvrir le PDF.
-                Text {
-                  visible: rowRoot.answer !== ""
-                  width: parent.width - root.cellsTotalWidth
-                  text: "lu : " + rowRoot.answer
-                  color: Qt.darker(root.foreground, 1.5)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                  textFormat: Text.PlainText
-                }
-
-                // L'arbitrage. Coloré, contrairement au "lu :" ci-dessus :
-                // c'est ce que Gabriel doit valider ou contredire.
-                Text {
-                  visible: rowRoot.doubt !== ""
-                  width: parent.width - root.cellsTotalWidth
-                  text: "⚖ " + rowRoot.doubt
-                  color: "#c98a3a"
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                  textFormat: Text.PlainText
-                }
-              }
-            }
-          }
-
-          PanelSeparator { foreground: root.foreground; width: parent.width }
-
-          Column {
-            width: parent.width
-            spacing: Style.spacing.xxs
-
-            Text { text: "Note"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
 
             Text {
-              width: parent.width
-              text: root.tallyLabel
-              color: Qt.darker(root.foreground, 1.4)
+              text: "Questionnaire — " + root.studentLabel
+              color: root.foreground
               font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.title
+              font.bold: true
               wrapMode: Text.WordWrap
+              width: parent.width
               textFormat: Text.PlainText
             }
 
             Text {
+              visible: root.missingCount > 0
               width: parent.width
-              text: "Calcul automatique actuel : " + (root.liveRaw || "—") + "  →  " + (root.liveNote || "—")
-              color: Qt.darker(root.foreground, 1.5)
+              text: "⚠ " + root.missingCount + " item(s) non coché(s) par l'agent — ils comptent 0 dans le total tant que vous ne les tranchez pas vous-même."
+              color: Color.urgent
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
               textFormat: Text.PlainText
-            }
-
-            Text {
-              visible: root.hasNoteOverride
-              width: parent.width
-              text: "⚠ Note corrigée à la main — l'affichage ne suit plus le calcul automatique tant que vous ne cliquez pas sur « Revenir au calcul automatique »."
-              color: root.accent
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
             }
 
             Row {
               spacing: Style.spacing.controlGap
-              TextField {
-                id: noteField
-                width: Style.space(70)
+              Button {
+                text: "👁 Voir la copie"
+                bordered: true
+                enabled: root.copyPath !== ""
                 foreground: root.foreground
                 accent: root.accent
+                onClicked: root.copyOpenRequested()
               }
               Button {
-                text: "💾 Enregistrer comme correction manuelle"
+                text: root.onlyDoubts ? "👁 Tout afficher" : "🔎 Seulement les items à arbitrer"
                 bordered: true
                 foreground: root.foreground
                 accent: root.accent
-                onClicked: root.noteSaved(noteField.text)
-              }
-              Button {
-                visible: root.hasNoteOverride
-                text: "↩ Revenir au calcul automatique"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                onClicked: root.resetNoteOverrideRequested()
+                onClicked: root.onlyDoubts = !root.onlyDoubts
               }
             }
-          }
 
-          Column {
-            width: parent.width
-            spacing: Style.spacing.xxs
-
-            Text { text: "Export"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-
-            Toggle {
+            Column {
+              id: table
+              visible: (root.rows || []).length > 0
               width: parent.width
-              label: "Inclure les réponses lues et les arbitrages"
-              description: "Décoché, le PDF ne contient que la grille cochée, le décompte et la note."
-              checked: root.includeDetailsInExport
-              foreground: root.foreground
-              accent: root.accent
-              fontFamily: root.fontFamily
-              onClicked: root.includeDetailsInExport = !root.includeDetailsInExport
+              spacing: Style.spacing.sm
+
+              Row {
+                width: parent.width
+                spacing: Style.spacing.xs
+
+                Text {
+                  width: parent.width - root.cellsTotalWidth
+                  text: "Items — cliquez une case pour la changer"
+                  font.bold: true
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                Repeater {
+                  model: root.columns
+                  delegate: Column {
+                    id: headerCell
+                    required property string modelData
+                    required property int index
+                    width: root.cellColWidth
+                    Text {
+                      width: parent.width
+                      text: headerCell.modelData
+                      horizontalAlignment: Text.AlignHCenter
+                      wrapMode: Text.WordWrap
+                      font.bold: true
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      textFormat: Text.PlainText
+                    }
+                    Text {
+                      width: parent.width
+                      text: QuestionnaireGrid.columnPointsLabel(headerCell.index, root.columnCount) + " pt"
+                      horizontalAlignment: Text.AlignHCenter
+                      color: Qt.darker(root.foreground, 1.5)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+              }
+
+              Repeater {
+                model: root.rows
+                delegate: Column {
+                  id: rowRoot
+                  required property var modelData
+                  required property int index
+                  width: table.width
+                  spacing: Style.spacing.xxs
+                  visible: !root.onlyDoubts || root.rowNeedsAttention(rowRoot.index)
+
+                  readonly property string doubt: String(root.doubts[String(rowRoot.index)] || "").trim()
+                  readonly property string answer: String(root.answers[String(rowRoot.index)] || "").trim()
+                  readonly property bool unchecked: root.checks[String(rowRoot.index)] === undefined
+
+                  Row {
+                    width: parent.width
+                    spacing: Style.spacing.xs
+
+                    Text {
+                      width: parent.width - root.cellsTotalWidth
+                      text: (rowRoot.index + 1) + ".  " + QuestionnaireGrid.plainLabel(rowRoot.modelData.text)
+                      color: rowRoot.unchecked ? Color.urgent : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                      textFormat: Text.PlainText
+                    }
+
+                    Repeater {
+                      model: root.columnCount
+                      delegate: Rectangle {
+                        id: cell
+                        required property int index
+                        width: root.cellColWidth
+                        height: Style.space(26)
+                        radius: Style.cornerRadius
+                        property bool checked: root.checks[String(rowRoot.index)] === cell.index
+                        color: cell.checked
+                          ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.18)
+                          : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                        border.width: 1
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: cell.checked ? "X" : ""
+                          font.bold: true
+                          color: root.accent
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.body
+                        }
+
+                        MouseArea {
+                          anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.checkChanged(rowRoot.index, cell.index)
+                        }
+                      }
+                    }
+                  }
+
+                  // Ce que l'agent dit avoir lu sur la copie — la seule
+                  // façon de vérifier une case sans rouvrir le PDF.
+                  Text {
+                    visible: rowRoot.answer !== ""
+                    width: parent.width - root.cellsTotalWidth
+                    text: "lu : " + rowRoot.answer
+                    color: Qt.darker(root.foreground, 1.5)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                  }
+
+                  // L'arbitrage. Coloré, contrairement au "lu :" ci-dessus :
+                  // c'est ce que Gabriel doit valider ou contredire.
+                  Text {
+                    visible: rowRoot.doubt !== ""
+                    width: parent.width - root.cellsTotalWidth
+                    text: "⚖ " + rowRoot.doubt
+                    color: "#c98a3a"
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                  }
+                }
+              }
+            }
+
+            PanelSeparator { foreground: root.foreground; width: parent.width }
+
+            Column {
+              width: parent.width
+              spacing: Style.spacing.xxs
+
+              Text { text: "Note"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+
+              Text {
+                width: parent.width
+                text: root.tallyLabel
+                color: Qt.darker(root.foreground, 1.4)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                width: parent.width
+                text: "Calcul automatique actuel : " + (root.liveRaw || "—") + "  →  " + (root.liveNote || "—")
+                color: Qt.darker(root.foreground, 1.5)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                textFormat: Text.PlainText
+              }
+
+              Text {
+                visible: root.hasNoteOverride
+                width: parent.width
+                text: "⚠ Note corrigée à la main — l'affichage ne suit plus le calcul automatique tant que vous ne cliquez pas sur « Revenir au calcul automatique »."
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              Row {
+                spacing: Style.spacing.controlGap
+                TextField {
+                  id: noteField
+                  width: Style.space(70)
+                  foreground: root.foreground
+                  accent: root.accent
+                }
+                Button {
+                  text: "💾 Enregistrer comme correction manuelle"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.noteSaved(noteField.text)
+                }
+                Button {
+                  visible: root.hasNoteOverride
+                  text: "↩ Revenir au calcul automatique"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.resetNoteOverrideRequested()
+                }
+              }
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.spacing.xxs
+
+              Text { text: "Export"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+
+              Toggle {
+                width: parent.width
+                label: "Inclure les réponses lues et les arbitrages"
+                description: "Décoché, le PDF ne contient que la grille cochée, le décompte et la note."
+                checked: root.includeDetailsInExport
+                foreground: root.foreground
+                accent: root.accent
+                fontFamily: root.fontFamily
+                onClicked: root.includeDetailsInExport = !root.includeDetailsInExport
+              }
+
+              Button {
+                text: "📄 Exporter la grille en PDF"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.exportRequested(root.includeDetailsInExport)
+              }
             }
 
             Button {
-              text: "📄 Exporter la grille en PDF"
+              text: "Fermer"
               bordered: true
               foreground: root.foreground
               accent: root.accent
-              onClicked: root.exportRequested(root.includeDetailsInExport)
+              onClicked: root.canceled()
             }
-          }
-
-          Button {
-            text: "Fermer"
-            bordered: true
-            foreground: root.foreground
-            accent: root.accent
-            onClicked: root.canceled()
           }
         }
       }

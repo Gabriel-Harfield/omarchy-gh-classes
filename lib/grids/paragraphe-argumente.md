@@ -12,6 +12,6 @@
 
 
 # Maîtrise de la langue et de l'expression à l'écrit.
-## Les normes orthographiques et syntaxiques sont bien respectées.
-## Le style est fluide et le propos cohérent.
+## L'orthographe (lexicale et grammaticale, accents compris) est maîtrisée.
+## La syntaxe et le style sont maîtrisés : phrases correctement construites, propos fluide et cohérent.
 ## Le niveau de langue employé est bien adapté à l'exercice.

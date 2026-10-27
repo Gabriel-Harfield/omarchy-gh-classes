@@ -26,22 +26,32 @@ Item {
 
   signal commentPicked(var entry)
   signal deleteConfirmed(string id)
+  signal editConfirmed(string id, string text)
   signal canceled()
 
   readonly property var filteredGroups: {
     var q = root.filterText.trim().toLowerCase()
     var groups = CommentsBankStore.groupedByTag(root.bank)
     if (!q) return groups
-    var out = []
+    // Tag matches first (the group whose tag contains the query), then the
+    // groups where only the comment text matches.
+    var tagHits = []
+    var textHits = []
     for (var i = 0; i < groups.length; i++) {
+      if (groups[i].tag.toLowerCase().indexOf(q) !== -1) {
+        tagHits.push(groups[i])
+        continue
+      }
       var kept = groups[i].entries.filter(function(e) {
-        return e.text.toLowerCase().indexOf(q) !== -1 || e.tag.toLowerCase().indexOf(q) !== -1
+        return e.text.toLowerCase().indexOf(q) !== -1
       })
-      if (kept.length > 0) out.push({ tag: groups[i].tag, entries: kept })
+      if (kept.length > 0) textHits.push({ tag: groups[i].tag, entries: kept })
     }
+    var out = tagHits.concat(textHits)
     return out
   }
 
+  property string _editId: ""
   property string _pendingDeleteId: ""
   property string _pendingDeleteLabel: ""
 
@@ -50,6 +60,7 @@ Item {
 
   onOpenedChanged: if (opened) {
     root.filterText = ""
+    root._editId = ""
     Qt.callLater(function() { searchField.forceActiveFocus() })
   }
 
@@ -129,13 +140,14 @@ Item {
           }
 
           ScrollView {
+            id: bankScroll
             anchors.fill: parent
             clip: true
-            visible: root.filteredGroups.length > 0
+            opacity: root.filteredGroups.length > 0 ? 1 : 0
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
             Column {
-            width: parent.width
+            width: bankScroll.availableWidth
             spacing: Style.spacing.md
 
             Repeater {
@@ -161,8 +173,9 @@ Item {
                   delegate: BorderSurface {
                     id: entryCard
                     required property var modelData
+                    readonly property bool editing: root._editId === modelData.id
                     width: parent ? parent.width : 0
-                    height: entryText.implicitHeight + Style.spacing.sm * 2
+                    height: (entryCard.editing ? editColumn.implicitHeight : Math.max(entryText.implicitHeight, deleteGlyph.height)) + Style.spacing.sm * 2
                     radius: Style.cornerRadius
                     color: entryHover.hovered
                       ? Style.hoverFillFor(root.foreground, root.accent)
@@ -176,8 +189,9 @@ Item {
                     Text {
                       id: entryText
                       anchors.left: parent.left
-                      anchors.right: deleteGlyph.left
+                      anchors.right: editBtn.left
                       anchors.verticalCenter: parent.verticalCenter
+                      visible: !entryCard.editing
                       anchors.leftMargin: entryCard.contentLeftInset
                       anchors.rightMargin: Style.spacing.controlGap
                       text: entryCard.modelData.text
@@ -194,25 +208,75 @@ Item {
                       }
                     }
 
-                    Text {
+                    Button {
+                      id: editBtn
+                      anchors.right: deleteGlyph.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.rightMargin: Style.spacing.controlGap
+                      visible: !entryCard.editing
+                      text: "Modifier"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: root.accent
+                      onClicked: {
+                        root._editId = entryCard.modelData.id
+                        editField.text = entryCard.modelData.text
+                        Qt.callLater(function() { editField.forceActiveFocus() })
+                      }
+                    }
+
+                    Column {
+                      id: editColumn
+                      visible: entryCard.editing
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.leftMargin: entryCard.contentLeftInset
+                      anchors.rightMargin: entryCard.contentRightInset
+                      spacing: Style.spacing.sm
+
+                      TextField {
+                        id: editField
+                        width: parent.width
+                        foreground: root.foreground
+                        accent: root.accent
+                        Keys.onReturnPressed: { root.editConfirmed(entryCard.modelData.id, text); root._editId = "" }
+                        Keys.onEnterPressed: { root.editConfirmed(entryCard.modelData.id, text); root._editId = "" }
+                        Keys.onEscapePressed: root._editId = ""
+                      }
+
+                      Row {
+                        spacing: Style.spacing.controlGap
+                        Button {
+                          text: "Enregistrer"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          onClicked: { root.editConfirmed(entryCard.modelData.id, editField.text); root._editId = "" }
+                        }
+                        Button {
+                          text: "Annuler"
+                          bordered: true
+                          foreground: root.foreground
+                          accent: root.accent
+                          onClicked: root._editId = ""
+                        }
+                      }
+                    }
+
+                    Button {
                       id: deleteGlyph
+                      visible: !entryCard.editing
                       anchors.right: parent.right
                       anchors.verticalCenter: parent.verticalCenter
                       anchors.rightMargin: entryCard.contentRightInset
-                      text: "×"
-                      color: Qt.darker(root.foreground, 1.3)
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.title
-                      font.bold: true
-
-                      HoverHandler { cursorShape: Qt.PointingHandCursor }
-                      MouseArea {
-                        anchors.fill: parent
-                        anchors.margins: -Style.space(6)
-                        onClicked: {
-                          root._pendingDeleteId = entryCard.modelData.id
-                          root._pendingDeleteLabel = entryCard.modelData.text
-                        }
+                      text: "Supprimer"
+                      bordered: true
+                      foreground: root.foreground
+                      accent: Color.urgent
+                      onClicked: {
+                        root._pendingDeleteId = entryCard.modelData.id
+                        root._pendingDeleteLabel = entryCard.modelData.text
                       }
                     }
                   }

@@ -58,25 +58,29 @@
 ## Les paragraphes de développement sont correctement construits, avec un argument, des citations dûment analysées étayant ce dernier et une interprétation faisant avancer la réflexion.
 
 - Non maîtrisé : L'ensemble des paragraphes de développement sont à revoir, ne possédant pas les différentes étapes nécessaires : argument, citation(s) analysé(s) et interprétation faisant avancer la réflexion.
-- Insuffisamment maîtrisé : Les paragraphes de développement ne sont pas encore complets, il leur manque tantôt un argument, tantôt des procédés littéraires ou une interprétation.
+- Insuffisamment maîtrisé : Les paragraphes de développement ne sont pas encore complets, il leur manque tantôt un argument, tantôt toute analyse de la citation (aucune tentative d'analyse), tantôt une interprétation.
 - En cours de maîtrise : Les paragraphes de développement sont bien agencés, mais il y a encore quelques oublis ici et là, notamment sur les interprétations, dont certaines sont encore absentes.
 - Maîtrisé : Les paragraphes de développement sont parfaitement construits, on y distingue bien l'argument justifiant l'axe, la ou les citations les illutrant correctement analysés avec des procédés précis et une interprétation expliquant en quoi l'ensemble fait avencer la thèse.
 
 # Maîtrise de la langue et de l'expression à l'écrit.
 
-## Les normes orthographiques et syntaxiques sont bien respectées.
+## L'orthographe (lexicale et grammaticale, accents compris) est maîtrisée.
 
-- Non maîtrisé : La copie est remplies de fautes d'orthographes et de syntaxe suffisamment graves pour qu'on ne parvienne plus à comprendre ce qu'on lit. On peut également relever ici une graphie rendant la copie illisible.
-- Insuffisamment maîtrisé : De nombreuses fautes d'orthographe et de syntaxe traversent encore la copie, produisant de temps à autres des ruptures syntaxiques qu'il serait urgent pour l'élève de corriger.
-- En cours de maîtrise : Le copie est globalement bien écrite, surtout du point de vue de la syntaxe. En effet, les phrases sont correctement construites, sans ruptures ou presque (on pourra accepter une ou deux ruptures syntaxiques si la copie est par ailleurs bien écrite). Quelques fautes d'orthographe (lexicale ou syntaxique) subsistent néanmoins, mais ne nuisent pas à la compréhension de l'ensemble.
-- Maîtrisé : La copie est parfaitement bien rédigé, tant pour ce qui est de l'orthographe que de la syntaxe. On peut admettre ici quelques fautes mineures d'orthographe, mais pas de syntaxe.
+- Non maîtrisé : La copie est remplie de fautes d'orthographe (lexicale et grammaticale) si nombreuses et si graves qu'on ne parvient plus à comprendre ce qu'on lit. On peut également relever ici une graphie rendant la copie illisible.
+- Insuffisamment maîtrisé : De nombreuses fautes d'orthographe, lexicale comme grammaticale (accords, conjugaisons, homophones, accents), traversent encore la copie.
+- En cours de maîtrise : La copie est globalement bien orthographiée. Quelques fautes d'orthographe (lexicale ou grammaticale) subsistent néanmoins, mais ne nuisent pas à la compréhension de l'ensemble.
+- Maîtrisé : L'orthographe est maîtrisée. On peut admettre ici quelques fautes mineures et isolées.
 
-## Le style est fluide et le propos cohérent.
+*Point de vigilance* : Ce critère juge UNIQUEMENT l'orthographe lexicale et grammaticale (accents compris). Les ruptures de construction, la longueur des phrases, le style et les connecteurs relèvent du critère « La syntaxe et le style sont maîtrisés » et ne sont jamais sanctionnés ici.
 
-- Non maîtrisé : La style est confus, les phrases sont bien trops longues et même quand la syntaxe est correcte, on ne comprends pas toujours où l'élève veut-il en venir. L'ensemble manque ainsi de cohérence.
-- Insuffisamment maîtrisé : Le style manque encore par moments de cohérence, est parfois maladroit ou enfantin.
-- En cours de maîtrise : Le style est globalement correct, mais il faut encore approfondir l'agencement des connecteurs logiques entre les phrases et paragraphes.
-- Maîtrisé : Le style est bien maîtrisé, fluide et propre, avec des phrases complexes correctement agencées et des connecteurs logiques bien employés et faisant avancer correctement la réflexion.
+## La syntaxe et le style sont maîtrisés : phrases correctement construites, propos fluide et cohérent.
+
+- Non maîtrisé : Les phrases sont mal construites ou beaucoup trop longues, le style est confus et, même quand la construction est correcte, on ne comprend pas toujours où l'élève veut en venir. L'ensemble manque ainsi de cohérence.
+- Insuffisamment maîtrisé : Des ruptures syntaxiques traversent encore la copie, et le style manque par moments de cohérence, est parfois maladroit ou enfantin.
+- En cours de maîtrise : Les phrases sont globalement bien construites, sans ruptures ou presque (on pourra accepter une ou deux ruptures syntaxiques si la copie est par ailleurs bien écrite), et le style est correct, mais il faut encore approfondir l'agencement des connecteurs logiques entre les phrases et paragraphes.
+- Maîtrisé : Aucune rupture syntaxique : les phrases, y compris complexes, sont correctement construites et agencées ; le style est fluide et propre, avec des connecteurs logiques bien employés et faisant avancer correctement la réflexion.
+
+*Point de vigilance* : Ce critère juge la construction des phrases (ruptures syntaxiques, phrases trop longues ou inachevées), le style et la cohérence du propos. Les fautes d'orthographe lexicale ou grammaticale ne sont JAMAIS sanctionnées ici : elles relèvent du critère « L'orthographe (lexicale et grammaticale, accents compris) est maîtrisée ».
 
 ## Le niveau de langue employé est bien adapté à l'exercice.
 

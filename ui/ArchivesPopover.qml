@@ -11,6 +11,9 @@ Item {
   id: root
 
   property bool opened: false
+  // Popover zoom (shared, persisted by Panel.qml).
+  property real zoom: 1.0
+  signal zoomChangeRequested(real zoom)
   property var entries: [] // [{ file, when, title, done, total }]
   property string feedback: ""
   property color foreground: Color.foreground
@@ -50,91 +53,135 @@ Item {
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
 
-        Column {
-          width: card.width - card.contentLeftInset - card.contentRightInset
-          spacing: Style.spacing.huge
+        // Gabriel, 2026-10-21: popover-local zoom (the panel-wide one does not
+        // reach popovers) — same scale-transform trick as Panel.qml's
+        // zoomWrapper; the wrapper reports the REAL scaled size to the ScrollView.
+        Item {
+          id: zoomWrapper
+          width: zoomColumn.width * root.zoom
+          height: zoomColumn.height * root.zoom
+          implicitWidth: width
+          implicitHeight: height
 
-          Text {
-            text: "Archives des évaluations"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.title
-            font.bold: true
-          }
+          Column {
+            id: zoomColumn
+            width: (card.width - card.contentLeftInset - card.contentRightInset) / root.zoom
+            scale: root.zoom
+            transformOrigin: Item.TopLeft
+            spacing: Style.spacing.huge
 
-          Text {
-            width: parent.width
-            text: "Évaluations archivées pour cette classe. Restaurer une archive remet ses corrections dans l'onglet ; l'évaluation actuellement en place est d'abord archivée, donc rien n'est écrasé. Les PDF des copies ne sont pas archivés : ils doivent toujours se trouver dans le dossier d'origine."
-            color: Qt.darker(root.foreground, 1.4)
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-          }
-
-          Text {
-            visible: root.entries.length === 0
-            width: parent.width
-            text: "Aucune archive pour cette classe."
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-          }
-
-          Repeater {
-            model: root.entries
-            delegate: Column {
-              id: entryRow
-              required property var modelData
+            Row {
+              layoutDirection: Qt.RightToLeft
               width: parent.width
-              spacing: Style.spacing.xxs
+              spacing: Style.spacing.xs
 
+              Button {
+                text: "+"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom + 0.1)
+              }
               Text {
-                width: parent.width
-                text: entryRow.modelData.when + "  ·  " + entryRow.modelData.title
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(44)
+                horizontalAlignment: Text.AlignHCenter
+                text: Math.round(root.zoom * 100) + "%"
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
-                font.bold: true
-                wrapMode: Text.WrapAnywhere
-                textFormat: Text.PlainText
               }
-              Row {
-                spacing: Style.spacing.controlGap
+              Button {
+                text: "−"
+                bordered: true
+                foreground: root.foreground
+                accent: root.accent
+                onClicked: root.zoomChangeRequested(root.zoom - 0.1)
+              }
+            }
+
+            Text {
+              text: "Archives des évaluations"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+
+            Text {
+              width: parent.width
+              text: "Évaluations archivées pour cette classe. Restaurer une archive remet ses corrections dans l'onglet ; l'évaluation actuellement en place est d'abord archivée, donc rien n'est écrasé. Les PDF des copies ne sont pas archivés : ils doivent toujours se trouver dans le dossier d'origine."
+              color: Qt.darker(root.foreground, 1.4)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
+              visible: root.entries.length === 0
+              width: parent.width
+              text: "Aucune archive pour cette classe."
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+
+            Repeater {
+              model: root.entries
+              delegate: Column {
+                id: entryRow
+                required property var modelData
+                width: parent.width
+                spacing: Style.spacing.xxs
+
                 Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: entryRow.modelData.done + " / " + entryRow.modelData.total + " copies corrigées"
-                  color: Qt.darker(root.foreground, 1.4)
+                  width: parent.width
+                  text: entryRow.modelData.when + "  ·  " + entryRow.modelData.title
+                  color: root.foreground
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                  wrapMode: Text.WrapAnywhere
+                  textFormat: Text.PlainText
                 }
-                Button {
-                  text: "↩ Restaurer"
-                  bordered: true
-                  foreground: root.foreground
-                  accent: root.accent
-                  onClicked: root.restoreRequested(entryRow.modelData.file)
+                Row {
+                  spacing: Style.spacing.controlGap
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: entryRow.modelData.done + " / " + entryRow.modelData.total + " copies corrigées"
+                    color: Qt.darker(root.foreground, 1.4)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  Button {
+                    text: "↩ Restaurer"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: root.accent
+                    onClicked: root.restoreRequested(entryRow.modelData.file)
+                  }
                 }
               }
             }
-          }
 
-          Text {
-            visible: root.feedback !== ""
-            width: parent.width
-            text: root.feedback
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
-            wrapMode: Text.WordWrap
-            textFormat: Text.PlainText
-          }
+            Text {
+              visible: root.feedback !== ""
+              width: parent.width
+              text: root.feedback
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+              textFormat: Text.PlainText
+            }
 
-          Button {
-            text: "Fermer"
-            bordered: true
-            foreground: root.foreground
-            accent: root.accent
-            onClicked: root.canceled()
+            Button {
+              text: "Fermer"
+              bordered: true
+              foreground: root.foreground
+              accent: root.accent
+              onClicked: root.canceled()
+            }
           }
         }
       }

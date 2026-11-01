@@ -2843,11 +2843,11 @@ Item {
     var cls = root.activeClass()
     if (!ev || !cls || !root.evaluationIsCompetency()) return ""
     var grid = CompetencyGrids.findGrid(ev.gridId)
-    var lines = ["Devoir;Classe;Élève;Note"]
+    var lines = ["Devoir;Classe;Élève;Note;1/3 temps"]
     root._questionnaireStudentsSorted().forEach(function(s) {
       var entry = CorrectionsStore.studentEntry(ev, s.id)
       var note = entry.excluded ? "ABS" : (entry.status === "done" ? root._competencyNoteOf(ev, grid, entry) : "")
-      lines.push([ev.title, cls.name, Store.studentLabel(s), note].map(function(f) { return Draw.csvField(f) }).join(";"))
+      lines.push([ev.title, cls.name, Store.studentLabel(s), note, (!entry.excluded && entry.tiersTemps) ? "oui" : ""].map(function(f) { return Draw.csvField(f) }).join(";"))
     })
     return lines.join("\n") + "\n"
   }
@@ -5131,7 +5131,7 @@ Item {
     var intitule = evaluationIntituleField.text.trim()
     var sorted = cls.students.slice().sort(function(a, b) { return a.nom.localeCompare(b.nom) })
     var seen = {}
-    var lines = ["Devoir;Classe;Élève(s);Note"]
+    var lines = ["Devoir;Classe;Élève(s);Note;1/3 temps"]
     sorted.forEach(function(s) {
       if (seen[s.id]) return
       var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
@@ -5141,7 +5141,8 @@ Item {
       var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
       var entry = root._evalEntryOf(s, gridId)
       var note = (entry && entry.absent) ? "ABS" : root.evalNoteOf(grid, entry, weights)
-      lines.push([Draw.csvField(intitule), Draw.csvField(cls.name), Draw.csvField(label), Draw.csvField(note)].join(";"))
+      var tiers = (entry && entry.tiersTemps && !entry.absent) ? "oui" : ""
+      lines.push([Draw.csvField(intitule), Draw.csvField(cls.name), Draw.csvField(label), Draw.csvField(note), Draw.csvField(tiers)].join(";"))
     })
     return lines.join("\n") + "\n"
   }

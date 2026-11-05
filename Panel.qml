@@ -502,7 +502,7 @@ Item {
     root.loadEvaluationFields()
   }
 
-  property string activeFeatureTab: "tirage" // tirage | groupes | appreciations | corrections | evaluation | assistant | exercices
+  property string activeFeatureTab: "tirage" // tirage | groupes | appreciations | corrections | evaluation | assistant | questionnaire | exercices
 
   // Every feature tab lives in the same ScrollView (siblings toggled by
   // `visible`), so they share one contentY. Leaving a long tab scrolled
@@ -5552,6 +5552,7 @@ Item {
                   { value: "corrections", label: "📝 Corrections" },
                   { value: "evaluation", label: "📋 Eval. Compétences" },
                   { value: "assistant", label: "🔎 Assistant de correction" },
+                  { value: "questionnaire", label: "🧾 Questionnaire" },
                   { value: "exercices", label: "📚 Exercices" }
                 ]
                 value: root.activeFeatureTab
@@ -8781,6 +8782,22 @@ Item {
                     }
                   }
                 }
+              }
+
+              // ============================================== questionnaire
+
+              QcmTab {
+                visible: root.activeFeatureTab === "questionnaire"
+                width: parent.width
+                classId: root.activeClass() ? root.activeClass().id : ""
+                className: root.activeClass() ? root.activeClass().name : ""
+                students: root.activeClass() ? root.activeClass().students : []
+                stateDir: root.stateDir
+                homeDir: root.homeDir
+                foreground: root.foreground
+                background: root.background
+                accent: root.accent
+                fontFamily: root.fontFamily
               }
 
               // ================================================= exercices

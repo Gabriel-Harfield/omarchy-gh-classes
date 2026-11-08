@@ -2241,6 +2241,7 @@ Item {
     questionnaireRenderProc.running = false
     questionnaireImagesListProc.running = false
     competencyBulletsProc.running = false
+    competencySummaryProc.running = false
     var ctx = root._correctionRunContext
     if (ctx) root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, { status: "error", error: "Correction annulée." })
     else root.releaseOrphanRunningCorrections()
@@ -3613,6 +3614,53 @@ Item {
     root._competencyAppreciationOnly = true
     root._competencyAddendum = ""
     root.startCommentBullets()
+  }
+
+  // "🔄 Rédiger l'appréciation" (Gabriel, 2026-11-07, réintégré): on demand
+  // only, never during a correction run. Summarises the per-critère
+  // comments AS THEY NOW STAND (palier + justification, after Gabriel has
+  // settled the ⚠ doubts) — no copy re-read, grid/note/exercices untouched.
+  function requestRegenerateCommentSummary(studentId, maxChars) {
+    if (root.correctionRunningStudentId !== "") return
+    var classId = root.currentCorrectionsClassId()
+    var ev = root.activeEvaluation()
+    if (!classId || !ev || !ev.gridId || !studentId) return
+    var grid = CompetencyGrids.findGrid(ev.gridId)
+    if (!grid) return
+    root.competencyRegenKind = "summary"
+    var entry = CorrectionsStore.studentEntry(ev, studentId)
+    root.correctionRunningStudentId = studentId
+    root.setCorrectionStudentPatch(classId, studentId, { status: "running", error: "" })
+    root._correctionRunContext = { classId: classId, studentId: studentId }
+    root._competencyGrid = grid
+    var prompt = CommentGuidePromptBuilder.buildSummaryPrompt({
+      gridName: grid.name, rows: grid.rows,
+      checks: entry.competencyChecks, justifications: entry.competencyJustifications,
+      maxChars: maxChars || 0
+    })
+    competencySummaryProc.command = ClaudeRunner.buildCommand(prompt, root.correctionRunAgentOpts())
+    competencySummaryProc.running = false
+    competencySummaryProc.running = true
+  }
+
+  Process {
+    id: competencySummaryProc
+    stdout: StdioCollector { id: competencySummaryOut; waitForEnd: true }
+    stderr: StdioCollector { id: competencySummaryErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var ctx = root._correctionRunContext
+      if (!ctx) return
+      var text = (competencySummaryOut.text || "").trim()
+      if (exitCode !== 0 || text === "") {
+        root.finalizeCorrectionError((competencySummaryErr.text || "Échec de la génération de l'appréciation.").slice(0, 500))
+        return
+      }
+      root.setCorrectionStudentPatch(ctx.classId, ctx.studentId, { status: "done", appreciation: text, error: "" })
+      root._correctionRunContext = null
+      root._competencyGrid = null
+      root.correctionRunningStudentId = ""
+      root.processCorrectionQueue()
+    }
   }
 
   // Per-student "Afficher dans le PDF" boxes (Gabriel, 2026-10-19).
@@ -8976,6 +9024,7 @@ Item {
         onBulletEdited: function(id, text) { root.editCommentBullet(root.competencyGridPopoverStudentId, id, text) }
         onBankInsertRequested: root.openCorrectionCommentBank()
         onPdfFlagChanged: function(field, value) { root.setCommentPdfFlag(root.competencyGridPopoverStudentId, field, value) }
+        onSummaryRegenerateRequested: function(maxChars) { root.requestRegenerateCommentSummary(root.competencyGridPopoverStudentId, maxChars) }
         onBulletsRegenerateRequested: function(cap) { root.requestRegenerateCommentBullets(root.competencyGridPopoverStudentId, cap) }
         onResetNoteOverrideRequested: root.resetCompetencyNoteOverride(root.competencyGridPopoverStudentId)
         onCopyOpenRequested: root.openCompetencyGridCopy()

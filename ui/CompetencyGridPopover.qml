@@ -56,6 +56,8 @@ Item {
   // button, independently of the "plan dans le PDF" box.
   readonly property bool hasPlan: !!(root.grid && (root.grid.hybrid || root.grid.hasPlan))
   property bool showPlan: true
+  // Taille de l'appréciation générée (caractères max ; 0 = libre).
+  property string summarySize: "300"
   readonly property bool planVisible: root.hasPlan && root.showPlan && root.plan !== ""
   property color foreground: Color.foreground
   property color background: Color.background
@@ -101,6 +103,7 @@ Item {
   signal bulletBanked(string id)
   signal bulletEdited(string id, string text)
   signal bankInsertRequested()
+  signal summaryRegenerateRequested(int maxChars)
   signal bulletsRegenerateRequested(int cap)
   // Popover-local zoom (the panel-wide one does not reach popovers).
   property real zoom: 1.0
@@ -456,7 +459,7 @@ Item {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     background: null
-                    placeholderText: "Facultatif — écrite à la main. Si ce champ reste vide, la section n'apparaît pas dans le PDF."
+                    placeholderText: "Facultatif — écrivez-la à la main ou cliquez sur « Rédiger l'appréciation » une fois les ⚠ tranchés. Si ce champ reste vide, la section n'apparaît pas dans le PDF."
                   }
                 }
               }
@@ -470,6 +473,29 @@ Item {
                   foreground: root.foreground
                   accent: root.accent
                   onClicked: root.appreciationSaved(summaryField.text)
+                }
+                Button {
+                  text: (root.regenerating && root.regeneratingKind === "summary") ? "🔄 Rédaction en cours…" : "🔄 Rédiger l'appréciation"
+                  bordered: true
+                  enabled: !root.regenerating
+                  foreground: root.foreground
+                  accent: root.accent
+                  tooltipText: "Résume les commentaires par critère tels qu'ils sont maintenant (paliers corrigés inclus), sans relire la copie. Remplace l'appréciation actuelle."
+                  onClicked: root.summaryRegenerateRequested(parseInt(root.summarySize, 10))
+                }
+                Dropdown {
+                  options: [
+                    { value: "150", label: "Bref (150 car.)" },
+                    { value: "300", label: "Moyen (300 car.)" },
+                    { value: "500", label: "Long (500 car.)" },
+                    { value: "0", label: "Libre" }
+                  ]
+                  value: root.summarySize
+                  foreground: root.foreground
+                  background: root.background
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  onChanged: function(value) { root.summarySize = value }
                 }
               }
 
@@ -664,17 +690,43 @@ Item {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     background: null
-                    placeholderText: "Facultatif — écrite à la main. Si ce champ reste vide, la section n'apparaît pas dans le PDF."
+                    placeholderText: "Facultatif — écrivez-la à la main ou cliquez sur « Rédiger l'appréciation » une fois les ⚠ tranchés. Si ce champ reste vide, la section n'apparaît pas dans le PDF."
                   }
                 }
               }
 
-              Button {
-                text: "💾 Enregistrer l'appréciation"
-                bordered: true
-                foreground: root.foreground
-                accent: root.accent
-                onClicked: root.appreciationSaved(appreciationField.text)
+              Row {
+                spacing: Style.spacing.controlGap
+                Button {
+                  text: "💾 Enregistrer l'appréciation"
+                  bordered: true
+                  foreground: root.foreground
+                  accent: root.accent
+                  onClicked: root.appreciationSaved(appreciationField.text)
+                }
+                Button {
+                  text: (root.regenerating && root.regeneratingKind === "summary") ? "🔄 Rédaction en cours…" : "🔄 Rédiger l'appréciation"
+                  bordered: true
+                  enabled: !root.regenerating
+                  foreground: root.foreground
+                  accent: root.accent
+                  tooltipText: "Résume les commentaires par critère tels qu'ils sont maintenant (paliers corrigés inclus), sans relire la copie. Remplace l'appréciation actuelle."
+                  onClicked: root.summaryRegenerateRequested(parseInt(root.summarySize, 10))
+                }
+                Dropdown {
+                  options: [
+                    { value: "150", label: "Bref (150 car.)" },
+                    { value: "300", label: "Moyen (300 car.)" },
+                    { value: "500", label: "Long (500 car.)" },
+                    { value: "0", label: "Libre" }
+                  ]
+                  value: root.summarySize
+                  foreground: root.foreground
+                  background: root.background
+                  accent: root.accent
+                  fontFamily: root.fontFamily
+                  onChanged: function(value) { root.summarySize = value }
+                }
               }
             }
 

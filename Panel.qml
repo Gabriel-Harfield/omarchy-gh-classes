@@ -620,7 +620,7 @@ Item {
 
   function performDraw() {
     var cls = root.activeClass()
-    if (!cls || cls.students.length === 0) return
+    if (!cls || Draw.eligible(cls.students).length === 0) return
     var picks = Draw.pickThree(cls.students)
     var ids = picks.map(function(p) { return p.id })
     var updatedStudents = Draw.recordDraw(cls.students, ids, new Date().toISOString())
@@ -630,6 +630,57 @@ Item {
     var byId = {}
     updatedStudents.forEach(function(s) { byId[s.id] = s })
     root.lastDraw = ids.map(function(id) { return byId[id] })
+    if (root.syncDir) root.runSync()
+  }
+
+  // "🚫 Exclure du tirage" (Gabriel, 2026-11-02): per-student opt-out of
+  // the draw pool, e.g. a PAP-type aménagement — see Store.js's
+  // drawExcluded schema comment.
+  // Deliberately NOT shown anywhere on the tirage tab itself (Gabriel,
+  // 2026-11-02): the panel is projected to the class during the draw, and
+  // students must not learn that someone was taken out of the pool. Only
+  // the popover, opened on purpose, lists who is excluded.
+  property bool drawExclusionOpen: false
+  function openDrawExclusion() { root.drawExclusionOpen = true }
+  function closeDrawExclusion() { root.drawExclusionOpen = false }
+  function setDrawExcluded(studentId, excluded) {
+    var cls = root.activeClass()
+    if (!cls) return
+    var now = new Date().toISOString()
+    var updatedStudents = cls.students.map(function(s) {
+      if (s.id !== studentId) return s
+      var out = {}
+      Object.keys(s).forEach(function(k) { out[k] = s[k] })
+      out.drawExcluded = !!excluded
+      out.drawExcludedAt = now
+      return out
+    })
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
+    root.classes = Store.replaceClass(root.classes, updatedClass)
+    root.persistClasses()
+    if (root.syncDir) root.runSync()
+  }
+
+  // "🚫 Exclure des groupes" — same idea as the draw exclusion above, for the
+  // Groupes tab (also projected: nothing is displayed there about it).
+  property bool groupExclusionOpen: false
+  function openGroupExclusion() { root.groupExclusionOpen = true }
+  function closeGroupExclusion() { root.groupExclusionOpen = false }
+  function setGroupExcluded(studentId, excluded) {
+    var cls = root.activeClass()
+    if (!cls) return
+    var now = new Date().toISOString()
+    var updatedStudents = cls.students.map(function(s) {
+      if (s.id !== studentId) return s
+      var out = {}
+      Object.keys(s).forEach(function(k) { out[k] = s[k] })
+      out.groupExcluded = !!excluded
+      out.groupExcludedAt = now
+      return out
+    })
+    var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
+    root.classes = Store.replaceClass(root.classes, updatedClass)
+    root.persistClasses()
     if (root.syncDir) root.runSync()
   }
 
@@ -649,7 +700,7 @@ Item {
       // competencyClearedAt entirely, silently wiping every student's
       // "Eval. Compétences" answers on a plain tirage reset — an unrelated
       // feature. Preserved explicitly now, same as every other field here.
-      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: 0, drawHistory: [], competencyGrids: s.competencyGrids, competencyClearedAt: s.competencyClearedAt }
+      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: 0, drawHistory: [], competencyGrids: s.competencyGrids, competencyClearedAt: s.competencyClearedAt, drawExcluded: s.drawExcluded, drawExcludedAt: s.drawExcludedAt, groupExcluded: s.groupExcluded, groupExcludedAt: s.groupExcludedAt }
     })
     var updated = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: resetStudents, incompatibilities: cls.incompatibilities, lastResetAt: new Date().toISOString(), competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updated)
@@ -720,8 +771,10 @@ Item {
 
   function generateGroupsForActiveClass() {
     var cls = root.activeClass()
-    if (!cls || cls.students.length === 0) return
-    var result = Groups.generateGroups(cls.students, root.groupCount, cls.incompatibilities)
+    if (!cls) return
+    var pool = cls.students.filter(function(s) { return !s.groupExcluded })
+    if (pool.length === 0) return
+    var result = Groups.generateGroups(pool, root.groupCount, cls.incompatibilities)
     root.lastGroups = result.groups
     root.lastGroupsUnresolved = result.unresolved
   }
@@ -4184,7 +4237,7 @@ Item {
     var existingGrids = s.competencyGrids || {}
     Object.keys(existingGrids).forEach(function(gid) { grids[gid] = existingGrids[gid] })
     grids[gridId] = entry
-    return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: s.competencyClearedAt }
+    return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: s.competencyClearedAt, drawExcluded: s.drawExcluded, drawExcludedAt: s.drawExcludedAt, groupExcluded: s.groupExcluded, groupExcludedAt: s.groupExcludedAt }
   }
 
   // Writes `entry` (no binome fields needed) for the current student on
@@ -4563,7 +4616,7 @@ Item {
       var existingClearedAt = s.competencyClearedAt || {}
       Object.keys(existingClearedAt).forEach(function(gid) { clearedAt[gid] = existingClearedAt[gid] })
       clearedAt[root.evaluationGridId] = new Date().toISOString()
-      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: clearedAt }
+      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: clearedAt, drawExcluded: s.drawExcluded, drawExcludedAt: s.drawExcludedAt, groupExcluded: s.groupExcluded, groupExcludedAt: s.groupExcludedAt }
     })
     var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updatedClass)
@@ -4590,7 +4643,7 @@ Item {
       var existingClearedAt = s.competencyClearedAt || {}
       Object.keys(existingClearedAt).forEach(function(gid) { clearedAt[gid] = existingClearedAt[gid] })
       clearedAt[root.evaluationGridId] = new Date().toISOString()
-      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: clearedAt }
+      return { id: s.id, nom: s.nom, prenom: s.prenom, drawCount: s.drawCount, drawHistory: s.drawHistory, competencyGrids: grids, competencyClearedAt: clearedAt, drawExcluded: s.drawExcluded, drawExcludedAt: s.drawExcludedAt, groupExcluded: s.groupExcluded, groupExcludedAt: s.groupExcludedAt }
     })
     var updatedClass = { id: cls.id, name: cls.name, createdAt: cls.createdAt, students: updatedStudents, incompatibilities: cls.incompatibilities, lastResetAt: cls.lastResetAt, competencyIntitules: cls.competencyIntitules, competencyWeights: cls.competencyWeights, competencyBaremeTotal: cls.competencyBaremeTotal }
     root.classes = Store.replaceClass(root.classes, updatedClass)
@@ -5417,7 +5470,7 @@ Item {
           || correctionComplementsField.activeFocus
           || evaluationIntituleField.activeFocus || evaluationAppreciationField.activeFocus
           || evaluationCommentDraftField.activeFocus
-          || root.classSettingsOpen || root.incompatOpen || root.pathBarMode !== ""
+          || root.classSettingsOpen || root.incompatOpen || root.drawExclusionOpen || root.groupExclusionOpen || root.pathBarMode !== ""
           || root.deleteClassPendingId !== "" || root.resetDrawsConfirmOpen || root.syncSettingsOpen
           || root.correctionReplaceConfirmOpen || root.archivesPopoverOpen
           || root.correctionConsignesOverwriteConfirmOpen
@@ -5859,6 +5912,13 @@ Item {
                     onClicked: root.performDraw()
                   }
                   Button {
+                    text: "🚫 Exclure du tirage"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: root.accent
+                    onClicked: root.openDrawExclusion()
+                  }
+                  Button {
                     text: "📊 Statistiques (.csv)"
                     bordered: true
                     foreground: root.foreground
@@ -5954,6 +6014,14 @@ Item {
                     foreground: root.foreground
                     accent: root.accent
                     onClicked: root.openIncompat()
+                  }
+
+                  Button {
+                    text: "🚫 Exclure des groupes"
+                    bordered: true
+                    foreground: root.foreground
+                    accent: root.accent
+                    onClicked: root.openGroupExclusion()
                   }
 
                   NumberField {
@@ -8924,6 +8992,33 @@ Item {
         onSetAdded: function(studentIds) { root.addIncompatibilitySet(studentIds) }
         onSetRemoved: function(index) { root.removeIncompatibilitySet(index) }
         onCanceled: root.closeIncompat()
+      }
+
+      DrawExclusionPopover {
+        anchors.fill: parent
+        opened: root.drawExclusionOpen
+        students: root.activeClass() ? root.activeClass().students : []
+        foreground: root.foreground
+        background: root.background
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onToggled: function(studentId, excluded) { root.setDrawExcluded(studentId, excluded) }
+        onCanceled: root.closeDrawExclusion()
+      }
+
+      DrawExclusionPopover {
+        anchors.fill: parent
+        opened: root.groupExclusionOpen
+        flag: "groupExcluded"
+        title: "Exclure des groupes"
+        description: "Les élèves cochés ne seront placés dans aucun groupe généré."
+        students: root.activeClass() ? root.activeClass().students : []
+        foreground: root.foreground
+        background: root.background
+        accent: root.accent
+        fontFamily: root.fontFamily
+        onToggled: function(studentId, excluded) { root.setGroupExcluded(studentId, excluded) }
+        onCanceled: root.closeGroupExclusion()
       }
 
 

@@ -27,6 +27,7 @@ import "lib/CommentsBankStore.js" as CommentsBankStore
 import "lib/QuestionnaireGrid.js" as QuestionnaireGrid
 import "lib/QuestionnairePromptBuilder.js" as QuestionnairePromptBuilder
 import "lib/ClassReport.js" as ClassReport
+import "lib/BulletinTable.js" as BulletinTable
 import "ui"
 
 // GH Classes: one tab per class, weighted-random draw, group generation
@@ -476,6 +477,43 @@ Item {
     watchChanges: false
     atomicWrites: true
     printErrors: false
+    // bank done → chain into bulletin-table.json (last step of the chain).
+    onSaved: root.runBulletinSync()
+  }
+
+  // ---- bulletin-table.json sync — per-row last-write-wins (see
+  // BulletinTable.merge()) — last step in the chain: clears syncInFlight.
+
+  function runBulletinSync() {
+    var cmd = Files.readCommand(root._syncPendingDir, "bulletin-table.json", 4194304, 5)
+    if (!cmd) { syncInFlightTimeout.stop(); root.syncInFlight = false; return }
+    syncBulletinReadProc.command = cmd
+    syncBulletinReadProc.running = false
+    syncBulletinReadProc.running = true
+  }
+
+  Process {
+    id: syncBulletinReadProc
+    stdout: StdioCollector { id: syncBulletinReadOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      var remote = BulletinTable.parse(syncBulletinReadOut.text || "")
+      var merged = BulletinTable.merge(root.bulletinState, remote)
+      var changed = BulletinTable.serialize(merged) !== BulletinTable.serialize(root.bulletinState)
+      root.bulletinState = merged
+      if (changed) {
+        root.bulletinRev++
+        bulletinFile.setText(BulletinTable.serialize(merged))
+      }
+      syncBulletinWriteFile.path = root._syncPendingDir + "/bulletin-table.json"
+      Qt.callLater(function() { syncBulletinWriteFile.setText(BulletinTable.serialize(merged)) })
+    }
+  }
+
+  FileView {
+    id: syncBulletinWriteFile
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
     onSaved: { syncInFlightTimeout.stop(); root.syncInFlight = false }
   }
 
@@ -742,6 +780,7 @@ Item {
     else if (mode === "exportCompetencyClassPdf") root.startCompetencyClassPdfExport(path)
     else if (mode === "exportCompetencyReportPdf") root.startCompetencyReportPdfExport(path)
     else if (mode === "exportStudentReportPdf") root.startStudentReportPdfExport(path)
+    else if (mode === "exportBulletinCsv") root.startBulletinCsvExport(path)
   }
   function cancelPathEntry() { root.pathBarMode = "" }
 
@@ -855,10 +894,8 @@ Item {
   property string appreciationStudentId: ""
 
   function generateAppreciation() {
-    var values = root.appreciationMode === "bulletin"
-      ? { travail: travailField.text, comportement: comportementField.text, axe: axeField.text }
-      : { methode: methodeField.text, contenu: contenuField.text, expression: expressionField.text }
-    var prompt = PromptBuilder.buildAppreciationPrompt(root.appreciationMode, values, parseInt(root.maxCharsOption, 10))
+    var values = { methode: methodeField.text, contenu: contenuField.text, expression: expressionField.text }
+    var prompt = PromptBuilder.buildAppreciationPrompt("copies", values, parseInt(root.maxCharsOption, 10))
     root.generatingAppreciation = true
     root.appreciationError = ""
     root.appreciationResult = ""
@@ -885,9 +922,6 @@ Item {
     methodeField.text = ""
     contenuField.text = ""
     expressionField.text = ""
-    travailField.text = ""
-    comportementField.text = ""
-    axeField.text = ""
     root.appreciationResult = ""
     root.appreciationError = ""
     root.appreciationCopyFeedback = ""
@@ -924,6 +958,268 @@ Item {
     }
   }
   Timer { id: appreciationCopyFeedbackTimer; interval: 2000; repeat: false; onTriggered: root.appreciationCopyFeedback = "" }
+
+  // ---- Bulletin: table of the whole class (Gabriel, 2026-11-18) ----------
+  //
+  // State lives in bulletin-table.json (local only, see BulletinTable.js).
+  // bulletinRev is bumped ONLY when text changes from outside the text
+  // fields (load, generation, reset) so the delegates re-read their value;
+  // typing writes through bulletinSet() without bumping it, otherwise every
+  // keystroke would rebuild the cells and steal focus.
+
+  property var bulletinState: ({ model: "sonnet", maxChars: "300", classes: {} })
+  property int bulletinRev: 0
+  // Which bulletin-table cell has keyboard focus ("" = none) — fed to the
+  // panel's key catcher so typing never triggers its shortcuts.
+  property string bulletinFocusOwner: ""
+  property bool bulletinGeneratingClass: false
+  property string bulletinGeneratingStudentId: ""
+  property string bulletinMessage: ""
+  property string bulletinError: ""
+  property var _bulletinRunIds: ({}) // position id → studentId, for the running class call
+  property string _bulletinRunClassId: ""
+  property string _bulletinRowClassId: ""
+  readonly property string bulletinPath: root.stateDir + "/bulletin-table.json"
+  readonly property bool bulletinBusy: root.bulletinGeneratingClass || root.bulletinGeneratingStudentId !== ""
+
+  FileView {
+    id: bulletinFile
+    path: root.bulletinPath
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onLoaded: { root.bulletinState = BulletinTable.parse(bulletinFile.text()); root.bulletinRev++ }
+    onLoadFailed: root.bulletinState = BulletinTable.parse("")
+  }
+
+  // Debounced: a typing burst writes once.
+  Timer { id: bulletinSaveTimer; interval: 700; repeat: false; onTriggered: root.persistBulletin() }
+  function persistBulletin() {
+    bulletinFile.setText(BulletinTable.serialize(root.bulletinState))
+    if (root.syncDir) root.runSync()
+  }
+
+  function bulletinRow(studentId) {
+    var cls = root.activeClass()
+    if (!cls) return BulletinTable.emptyRow()
+    var c = root.bulletinState.classes[cls.id]
+    return (c && c.rows[studentId]) || BulletinTable.emptyRow()
+  }
+
+  function bulletinGet(studentId, key) { return root.bulletinRow(studentId)[key] || "" }
+
+  // Silent write (no rev bump) — used by the text fields themselves.
+  function bulletinSet(studentId, key, value) {
+    var cls = root.activeClass()
+    if (!cls) return
+    var st = root.bulletinState
+    if (!st.classes[cls.id]) st.classes[cls.id] = { rows: {} }
+    var rows = st.classes[cls.id].rows
+    if (!rows[studentId]) rows[studentId] = BulletinTable.emptyRow()
+    if (rows[studentId][key] === value) return
+    rows[studentId][key] = value
+    rows[studentId].at = new Date().toISOString()
+    bulletinSaveTimer.restart()
+  }
+
+  function bulletinSetModel(value) { root.bulletinState.model = value; root.persistBulletin() }
+  function bulletinSetMaxChars(value) { root.bulletinState.maxChars = value; root.persistBulletin() }
+
+  function bulletinRowLocked(studentId) { return BulletinTable.isLocked(root.bulletinRow(studentId)) }
+
+  function bulletinClearAll() {
+    var cls = root.activeClass()
+    if (!cls) return
+    root.bulletinState.classes[cls.id] = { rows: {}, clearedAt: new Date().toISOString() }
+    root.bulletinMessage = ""
+    root.bulletinError = ""
+    root.bulletinRev++
+    root.persistBulletin()
+  }
+
+  function bulletinErrorText(raw) {
+    var kind = root.classifyCorrectionError(raw)
+    if (kind === "quota") return "Quota Claude épuisé — réessaie plus tard. (" + String(raw || "").slice(0, 200) + ")"
+    if (kind === "overload") return "Claude est surchargé — réessaie dans un moment."
+    return String(raw || "Échec de la génération.").slice(0, 500)
+  }
+
+  function bulletinGenerateClass() {
+    var cls = root.activeClass()
+    if (!cls || root.bulletinBusy) return
+    var entries = [], ids = {}
+    var n = 0, skippedLocked = 0
+    cls.students.forEach(function(s) {
+      var row = root.bulletinRow(s.id)
+      if (!BulletinTable.hasIndications(row)) return
+      if (BulletinTable.isLocked(row)) { skippedLocked++; return }
+      n++
+      ids[String(n)] = s.id
+      entries.push({ id: String(n), row: row })
+    })
+    if (entries.length === 0) {
+      root.bulletinError = skippedLocked > 0
+        ? "Toutes les lignes remplies ont une appréciation retouchée à la main (verrouillée) — utilise ↻ pour les refaire."
+        : "Aucune ligne n'a d'indications (Travail / Comportement / Axe)."
+      return
+    }
+    root.bulletinError = ""
+    root.bulletinMessage = ""
+    root._bulletinRunIds = ids
+    root._bulletinRunClassId = cls.id
+    root.bulletinGeneratingClass = true
+    var prompt = BulletinTable.buildClassPrompt(entries, parseInt(root.bulletinState.maxChars, 10))
+    bulletinClassProc.command = ClaudeRunner.buildCommand(prompt, { model: root.bulletinState.model })
+    bulletinClassProc.running = false
+    bulletinClassProc.running = true
+  }
+
+  Process {
+    id: bulletinClassProc
+    stdout: StdioCollector { id: bulletinClassOut; waitForEnd: true }
+    stderr: StdioCollector { id: bulletinClassErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      root.bulletinGeneratingClass = false
+      if (exitCode !== 0) {
+        root.bulletinError = root.bulletinErrorText(bulletinClassErr.text || bulletinClassOut.text)
+        return
+      }
+      var posIds = Object.keys(root._bulletinRunIds)
+      var res = BulletinTable.parseClassOutput(bulletinClassOut.text, posIds)
+      if (res.error) { root.bulletinError = res.error; return }
+      var c = root.bulletinState.classes[root._bulletinRunClassId]
+      if (!c) { root.bulletinState.classes[root._bulletinRunClassId] = { rows: {} }; c = root.bulletinState.classes[root._bulletinRunClassId] }
+      var done = 0
+      posIds.forEach(function(pid) {
+        var sid = root._bulletinRunIds[pid]
+        if (res.texts[pid] === undefined) return
+        if (!c.rows[sid]) c.rows[sid] = BulletinTable.emptyRow()
+        c.rows[sid].text = res.texts[pid]
+        c.rows[sid].gen = res.texts[pid]
+        c.rows[sid].at = new Date().toISOString()
+        done++
+      })
+      root.bulletinRev++
+      root.persistBulletin()
+      root.bulletinMessage = done + " appréciation(s) générée(s)."
+      if (res.missing.length > 0) root.bulletinError = res.missing.length + " élève(s) sans appréciation dans la réponse — relance-les avec ↻."
+    }
+  }
+
+  function bulletinGenerateStudent(studentId) {
+    var cls = root.activeClass()
+    if (!cls || root.bulletinBusy) return
+    var row = root.bulletinRow(studentId)
+    if (!BulletinTable.hasIndications(row)) {
+      root.bulletinError = "Cette ligne n'a pas d'indications (Travail / Comportement / Axe)."
+      return
+    }
+    var others = []
+    cls.students.forEach(function(s) {
+      if (s.id === studentId) return
+      var r = root.bulletinRow(s.id)
+      if (r.text) others.push(r.text)
+    })
+    root.bulletinError = ""
+    root.bulletinMessage = ""
+    root._bulletinRowClassId = cls.id
+    root.bulletinGeneratingStudentId = studentId
+    var prompt = BulletinTable.buildStudentPrompt(row, parseInt(root.bulletinState.maxChars, 10), others)
+    bulletinRowProc.command = ClaudeRunner.buildCommand(prompt, { model: root.bulletinState.model })
+    bulletinRowProc.running = false
+    bulletinRowProc.running = true
+  }
+
+  Process {
+    id: bulletinRowProc
+    stdout: StdioCollector { id: bulletinRowOut; waitForEnd: true }
+    stderr: StdioCollector { id: bulletinRowErr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var sid = root.bulletinGeneratingStudentId
+      root.bulletinGeneratingStudentId = ""
+      if (exitCode !== 0) {
+        root.bulletinError = root.bulletinErrorText(bulletinRowErr.text || bulletinRowOut.text)
+        return
+      }
+      var text = (bulletinRowOut.text || "").trim()
+      if (!text) { root.bulletinError = "Réponse vide."; return }
+      var c = root.bulletinState.classes[root._bulletinRowClassId]
+      if (!c || !c.rows[sid]) return
+      c.rows[sid].text = text
+      c.rows[sid].gen = text
+      c.rows[sid].at = new Date().toISOString()
+      root.bulletinRev++
+      root.persistBulletin()
+    }
+  }
+
+  // Student-per-line copy, same "NOM Prénom : texte" shape as the Copie tab.
+  function bulletinCopyAll() {
+    var cls = root.activeClass()
+    if (!cls) return
+    var lines = []
+    cls.students.forEach(function(s) {
+      var t = root.bulletinGet(s.id, "text")
+      if (t) lines.push(Store.studentLabel(s) + " : " + t)
+    })
+    if (lines.length === 0) return
+    bulletinCopyProc.command = ["wl-copy", lines.join("\n")]
+    bulletinCopyProc.running = false
+    bulletinCopyProc.running = true
+  }
+
+  // Copy ONE appreciation (text only, no name) to paste into the school's
+  // system.
+  function bulletinCopyStudent(studentId) {
+    var t = root.bulletinGet(studentId, "text")
+    if (!t) { root.bulletinError = "Rien à copier : cette ligne n'a pas d'appréciation."; return }
+    root.bulletinError = ""
+    bulletinCopyProc.command = ["wl-copy", t]
+    bulletinCopyProc.running = false
+    bulletinCopyProc.running = true
+  }
+
+  // CSV of the whole table, same conventions as the other exports
+  // (semicolons, quoted fields, path bar pre-filled in ~/Downloads).
+  property string bulletinCsvExportedPath: ""
+
+  function exportBulletinCsv() {
+    var cls = root.activeClass()
+    if (!cls || cls.students.length === 0) return
+    root.pathBarMode = "exportBulletinCsv"
+    var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
+    pathBarField.text = root.homeDir + "/Downloads/bulletin-" + root.slugify(cls.name) + "-" + ts + ".csv"
+    Qt.callLater(function() { pathBarField.forceActiveFocus() })
+  }
+
+  function startBulletinCsvExport(destPath) {
+    var cls = root.activeClass()
+    if (!cls) return
+    var lines = ["Nom;Prénom;Travail;Comportement;Axe de progression;Appréciation"]
+    cls.students.slice().sort(function(a, b) { return a.nom.localeCompare(b.nom) }).forEach(function(s) {
+      var r = root.bulletinRow(s.id)
+      lines.push([s.nom, s.prenom, r.travail, r.comportement, r.axe, r.text].map(function(f) { return Draw.csvField(f) }).join(";"))
+    })
+    root.bulletinCsvExportedPath = ""
+    bulletinCsvExportFile.path = destPath
+    var csv = lines.join("\n") + "\n"
+    Qt.callLater(function() { bulletinCsvExportFile.setText(csv) })
+  }
+
+  FileView {
+    id: bulletinCsvExportFile
+    watchChanges: false
+    atomicWrites: true
+    printErrors: false
+    onSaved: { root.bulletinCsvExportedPath = bulletinCsvExportFile.path; root.bulletinMessage = "CSV exporté : " + bulletinCsvExportFile.path }
+  }
+
+  Process {
+    id: bulletinCopyProc
+    onExited: function(exitCode) {
+      root.bulletinMessage = exitCode === 0 ? "Copié !" : "Échec de la copie."
+    }
+  }
 
   // Placeholder for the "ajouter à la planche d'étiquettes" button — wired
   // up but inert until the physical label-sheet Typst template exists (see
@@ -4177,7 +4473,7 @@ Item {
 
   // ---- binômes (Gabriel, 2026-10-06) ------------------------------------
   // Pair work: two students share ONE evaluation on the current grid. The
-  // link lives in each partner's grid entry (Store.js's binome/binomeAt),
+  // link lives in each partner's grid entry (Store.js's groupe/groupeAt),
   // so it's scoped to this grid and disappears with "🗑 Réinitialiser la
   // classe" like the rest of the entry. Every write goes through
   // _evalWriteEntry(), which mirrors the entry onto the partner — they
@@ -4194,29 +4490,41 @@ Item {
     return null
   }
 
-  // A pair only counts when both sides point at each other — a dangling
-  // one-sided link (partner deleted, or half-synced) is ignored.
-  function _evalPartnerIdOf(cls, studentId, gridId) {
+  // Groups (generalized from pairs, 2026-11-15). A member only counts when
+  // both sides list each other — a dangling one-sided link (member deleted,
+  // or half-synced) is ignored. Returns the OTHER members' ids, in roster
+  // order.
+  function _evalGroupIdsOf(cls, studentId, gridId) {
     var entry = root._evalEntryOf(root._findStudent(cls, studentId), gridId)
-    if (!entry || !entry.binome) return ""
-    var partnerEntry = root._evalEntryOf(root._findStudent(cls, entry.binome), gridId)
-    return (partnerEntry && partnerEntry.binome === studentId) ? entry.binome : ""
+    var listed = Store.entryGroupe(entry)
+    if (!listed.length) return []
+    var out = []
+    ;(cls.students || []).forEach(function(s) {
+      if (s.id === studentId || listed.indexOf(s.id) === -1) return
+      if (Store.entryGroupe(root._evalEntryOf(s, gridId)).indexOf(studentId) !== -1) out.push(s.id)
+    })
+    return out
   }
 
-  function evaluationPartnerId() {
-    return root._evalPartnerIdOf(root.activeClass(), root.evaluationStudentId, root.evaluationGridId)
+  // "A / B / C" for a student and their group, in roster order.
+  function _evalGroupLabelOf(cls, studentId, gridId) {
+    var ids = root._evalGroupIdsOf(cls, studentId, gridId)
+    if (!ids.length) {
+      var solo = root._findStudent(cls, studentId)
+      return solo ? Store.studentLabel(solo) : ""
+    }
+    ids.push(studentId)
+    return (cls.students || []).filter(function(s) { return ids.indexOf(s.id) !== -1 }).map(Store.studentLabel).join(" / ")
   }
 
-  function evaluationPartner() {
-    return root._findStudent(root.activeClass(), root.evaluationPartnerId())
+  function evaluationGroupIds() {
+    return root._evalGroupIdsOf(root.activeClass(), root.evaluationStudentId, root.evaluationGridId)
   }
 
-  // "Élève 1 / Élève 2" for the export header, or just the student alone.
+  // "Élève 1 / Élève 2 / ..." for the export header, or just the student alone.
   function evaluationStudentsLabel() {
-    var student = root.evaluationStudent()
-    if (!student) return ""
-    var partner = root.evaluationPartner()
-    return Store.studentLabel(student) + (partner ? " / " + Store.studentLabel(partner) : "")
+    if (!root.evaluationStudent()) return ""
+    return root._evalGroupLabelOf(root.activeClass(), root.evaluationStudentId, root.evaluationGridId)
   }
 
   function _evalEntryHasData(entry) {
@@ -4224,12 +4532,12 @@ Item {
     return Object.keys(entry.checks || {}).length > 0 || !!entry.appreciation || !!entry.annotationsPositif || !!entry.annotationsNegatif || (entry.comments || []).length > 0
   }
 
-  function _makeEvalEntry(base, binome, binomeAt) {
+  function _makeEvalEntry(base, groupe, groupeAt) {
     var b = base || {}
     var checks = {}
     Object.keys(b.checks || {}).forEach(function(k) { checks[k] = b.checks[k] })
     var comments = (b.comments || []).map(function(c) { return { id: c.id, text: c.text, tag: c.tag || "" } })
-    return { checks: checks, appreciation: b.appreciation || "", note: "", annotationsPositif: b.annotationsPositif || "", annotationsNegatif: b.annotationsNegatif || "", binome: binome || "", binomeAt: binomeAt || "", comments: comments, deletedComments: (b.deletedComments || []).slice(), tiersTemps: !!b.tiersTemps, tiersTempsAt: b.tiersTempsAt || "", absent: !!b.absent, absentAt: b.absentAt || "" }
+    return { checks: checks, appreciation: b.appreciation || "", note: "", annotationsPositif: b.annotationsPositif || "", annotationsNegatif: b.annotationsNegatif || "", groupe: (groupe || []).slice(), groupeAt: groupeAt || "", comments: comments, deletedComments: (b.deletedComments || []).slice(), tiersTemps: !!b.tiersTemps, tiersTempsAt: b.tiersTempsAt || "", absent: !!b.absent, absentAt: b.absentAt || "" }
   }
 
   function _studentWithEvalEntry(s, gridId, entry) {
@@ -4247,14 +4555,14 @@ Item {
     var cls = root.activeClass()
     var selfId = root.evaluationStudentId
     var gridId = root.evaluationGridId
-    var partnerId = root._evalPartnerIdOf(cls, selfId, gridId)
+    var groupIds = root._evalGroupIdsOf(cls, selfId, gridId)
     var current = root._evalEntryOf(root._findStudent(cls, selfId), gridId) || {}
     return students.map(function(s) {
-      if (s.id === selfId) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(entry, current.binome, current.binomeAt))
-      if (partnerId && s.id === partnerId) {
-        // 1/3 temps is personal: the partner keeps their OWN setting.
-        var partnerEntry = root._makeEvalEntry(entry, selfId, current.binomeAt)
+      if (s.id === selfId) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(entry, Store.entryGroupe(current), Store.entryGroupeAt(current)))
+      if (groupIds.indexOf(s.id) !== -1) {
+        // 1/3 temps is personal: each member keeps their OWN setting.
         var own = root._evalEntryOf(s, gridId)
+        var partnerEntry = root._makeEvalEntry(entry, Store.entryGroupe(own), Store.entryGroupeAt(own))
         partnerEntry.tiersTemps = !!(own && own.tiersTemps)
         partnerEntry.tiersTempsAt = (own && own.tiersTempsAt) || ""
         partnerEntry.absent = !!(own && own.absent)
@@ -4272,17 +4580,29 @@ Item {
     if (root.syncDir) root.runSync()
   }
 
-  // Classmates offered in the "Binôme" dropdown: everyone not already in
-  // a pair on this grid, plus the current partner.
-  function evaluationPartnerOptions() {
+  // Classmates offered in the "Ajouter au groupe" dropdown: everyone not
+  // already in a group on this grid (current members excluded too).
+  function evaluationGroupAddOptions() {
     var cls = root.activeClass()
-    var out = [{ value: "", label: "— Aucun —" }]
+    var out = [{ value: "", label: "— Choisir —" }]
     if (!cls || !root.evaluationStudentId) return out
-    var currentPartner = root.evaluationPartnerId()
     cls.students.forEach(function(s) {
       if (s.id === root.evaluationStudentId) return
-      if (s.id !== currentPartner && root._evalPartnerIdOf(cls, s.id, root.evaluationGridId)) return
+      if (root._evalGroupIdsOf(cls, s.id, root.evaluationGridId).length) return
       out.push({ value: s.id, label: Store.studentLabel(s) })
+    })
+    return out
+  }
+
+  // "Retirer du groupe": every member, the current student included.
+  function evaluationGroupRemoveOptions() {
+    var cls = root.activeClass()
+    var out = [{ value: "", label: "— Choisir —" }]
+    if (!cls || !root.evaluationStudentId) return out
+    var ids = root.evaluationGroupIds()
+    ids.push(root.evaluationStudentId)
+    cls.students.forEach(function(s) {
+      if (ids.indexOf(s.id) !== -1) out.push({ value: s.id, label: Store.studentLabel(s) })
     })
     return out
   }
@@ -4303,12 +4623,10 @@ Item {
     var seen = {}
     cls.students.forEach(function(s) {
       if (seen[s.id]) return
-      var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
-      var partner = partnerId ? root._findStudent(cls, partnerId) : null
-      var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
+      var label = root._evalGroupLabelOf(cls, s.id, gridId)
       out.push({ value: s.id, label: (root.evaluationStudentAbsent(s) ? "🟥 " : (root.evaluationStudentDone(s) ? "✅ " : "")) + label })
       seen[s.id] = true
-      if (partnerId) seen[partnerId] = true
+      root._evalGroupIdsOf(cls, s.id, gridId).forEach(function(m) { seen[m] = true })
     })
     return out
   }
@@ -4323,54 +4641,89 @@ Item {
   function evaluationStudentDisplayId(id) {
     var cls = root.activeClass()
     if (!cls || !id) return id
-    var partnerId = root._evalPartnerIdOf(cls, id, root.evaluationGridId)
-    if (!partnerId) return id
+    var members = root._evalGroupIdsOf(cls, id, root.evaluationGridId)
+    if (!members.length) return id
+    members.push(id)
     for (var i = 0; i < cls.students.length; i++) {
-      if (cls.students[i].id === id || cls.students[i].id === partnerId) return cls.students[i].id
+      if (members.indexOf(cls.students[i].id) !== -1) return cls.students[i].id
     }
     return id
   }
 
-  property string evaluationPairPendingId: "" // partner awaiting "écraser ?" confirmation
+  property string evaluationPairPendingId: "" // student awaiting "écraser ?" confirmation before joining
 
-  function setEvaluationPartner(id) {
+  function addToEvaluationGroup(id) {
     root.flushEvaluationFieldsIfPending()
     var cls = root.activeClass()
-    if (!cls || !root.evaluationStudentId || id === root.evaluationPartnerId()) return
-    if (id && root._evalEntryHasData(root._evalEntryOf(root._findStudent(cls, id), root.evaluationGridId))) {
+    if (!id || !cls || !root.evaluationStudentId || id === root.evaluationStudentId) return
+    if (root.evaluationGroupIds().indexOf(id) !== -1) return
+    if (root._evalEntryHasData(root._evalEntryOf(root._findStudent(cls, id), root.evaluationGridId))) {
       root.evaluationPairPendingId = id
       return
     }
-    root._applyEvaluationPartner(id)
+    root._applyAddToGroup(id)
   }
 
   function cancelEvaluationPair() { root.evaluationPairPendingId = "" }
   function confirmEvaluationPair() {
     var id = root.evaluationPairPendingId
     root.evaluationPairPendingId = ""
-    root._applyEvaluationPartner(id)
+    root._applyAddToGroup(id)
   }
 
-  // id "" = dissocier. Any previous partner of either student is unlinked
-  // (keeping its own copy of the data); the new partner receives the
-  // current student's evaluation, overwriting its own.
-  function _applyEvaluationPartner(id) {
+  // The new member receives the current student's evaluation, overwriting
+  // its own (1/3 temps and absence stay personal); every member's `groupe`
+  // is rewritten to the full member list minus themselves.
+  function _applyAddToGroup(id) {
     var cls = root.activeClass()
-    if (!cls || !root.evaluationStudentId) return
+    if (!cls || !root.evaluationStudentId || !id) return
     var selfId = root.evaluationStudentId
     var gridId = root.evaluationGridId
     var now = new Date().toISOString()
-    var unlink = [root._evalPartnerIdOf(cls, selfId, gridId)]
-    if (id) unlink.push(root._evalPartnerIdOf(cls, id, gridId))
+    var members = root.evaluationGroupIds()
+    members.push(selfId)
+    members.push(id)
     var current = root._evalEntryOf(root._findStudent(cls, selfId), gridId)
     var updatedStudents = cls.students.map(function(s) {
-      if (s.id === selfId) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(current, id, now))
-      if (id && s.id === id) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(current, selfId, now))
-      if (unlink.indexOf(s.id) !== -1) return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(root._evalEntryOf(s, gridId), "", now))
-      return s
+      if (members.indexOf(s.id) === -1) return s
+      var others = members.filter(function(m) { return m !== s.id })
+      var base = s.id === selfId ? current : Object.assign({}, current)
+      var own = root._evalEntryOf(s, gridId)
+      var entry = root._makeEvalEntry(base, others, now)
+      if (s.id !== selfId) {
+        entry.tiersTemps = !!(own && own.tiersTemps)
+        entry.tiersTempsAt = (own && own.tiersTempsAt) || ""
+        entry.absent = !!(own && own.absent)
+        entry.absentAt = (own && own.absentAt) || ""
+      }
+      return root._studentWithEvalEntry(s, gridId, entry)
     })
     root._commitEvalStudents(cls, updatedStudents)
     root.loadEvaluationFields()
+  }
+
+  // Removes `leavingId` from the current student's group: they keep their
+  // own copy of the evaluation, the others stay together.
+  function removeFromEvaluationGroup(leavingId) {
+    root.flushEvaluationFieldsIfPending()
+    var cls = root.activeClass()
+    if (!cls || !root.evaluationStudentId || !leavingId) return
+    var gridId = root.evaluationGridId
+    var members = root.evaluationGroupIds()
+    members.push(root.evaluationStudentId)
+    if (members.indexOf(leavingId) === -1) return
+    root._applyLeaveGroup(cls, members, leavingId, gridId)
+    root.loadEvaluationFields()
+  }
+
+  function _applyLeaveGroup(cls, members, leavingId, gridId) {
+    var now = new Date().toISOString()
+    var updatedStudents = cls.students.map(function(s) {
+      if (members.indexOf(s.id) === -1) return s
+      var others = s.id === leavingId ? [] : members.filter(function(m) { return m !== s.id && m !== leavingId })
+      return root._studentWithEvalEntry(s, gridId, root._makeEvalEntry(root._evalEntryOf(s, gridId), others, now))
+    })
+    root._commitEvalStudents(cls, updatedStudents)
   }
 
   // Unlike checks/appreciation/note, the intitulé (assignment title) lives
@@ -4536,9 +4889,8 @@ Item {
     var seen = {}
     cls.students.forEach(function(s) {
       if (seen[s.id]) return
-      var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
       seen[s.id] = true
-      if (partnerId) seen[partnerId] = true
+      root._evalGroupIdsOf(cls, s.id, gridId).forEach(function(m) { seen[m] = true })
       res.total++
       if (root.evaluationStudentAbsent(s)) res.absent++
       else if (root.evaluationStudentDone(s)) res.done++
@@ -4599,11 +4951,11 @@ Item {
     root.resetEvaluationStudentConfirmOpen = false
     var cls = root.activeClass()
     if (!cls || !root.evaluationStudentId) return
-    // The partner (if any) keeps its copy of the evaluation, just unpaired.
-    var partnerId = root.evaluationPartnerId()
+    // The other members keep their copy of the evaluation, minus this student.
+    var groupIds = root.evaluationGroupIds()
     var now = new Date().toISOString()
     var updatedStudents = cls.students.map(function(s) {
-      if (partnerId && s.id === partnerId) return root._studentWithEvalEntry(s, root.evaluationGridId, root._makeEvalEntry(root._evalEntryOf(s, root.evaluationGridId), "", now))
+      if (groupIds.indexOf(s.id) !== -1) return root._studentWithEvalEntry(s, root.evaluationGridId, root._makeEvalEntry(root._evalEntryOf(s, root.evaluationGridId), groupIds.filter(function(m) { return m !== s.id }), now))
       if (s.id !== root.evaluationStudentId) return s
       var grids = {}
       var existingGrids = s.competencyGrids || {}
@@ -5158,8 +5510,8 @@ Item {
     if (!student) return
     root.pathBarMode = "exportEvalPdf"
     var ts = Qt.formatDateTime(new Date(), "yyyyMMdd-HHmmss")
-    var partner = root.evaluationPartner()
-    pathBarField.text = root.homeDir + "/Downloads/eval-" + root.slugify(Store.studentLabel(student)) + (partner ? "-" + root.slugify(Store.studentLabel(partner)) : "") + "-" + ts + ".pdf"
+    var groupNames = root.evaluationGroupIds().map(function(m) { return "-" + root.slugify(Store.studentLabel(root._findStudent(root.activeClass(), m))) }).join("")
+    pathBarField.text = root.homeDir + "/Downloads/eval-" + root.slugify(Store.studentLabel(student)) + groupNames + "-" + ts + ".pdf"
     Qt.callLater(function() { pathBarField.forceActiveFocus() })
   }
 
@@ -5235,11 +5587,9 @@ Item {
     var lines = ["Devoir;Classe;Élève(s);Note;1/3 temps"]
     sorted.forEach(function(s) {
       if (seen[s.id]) return
-      var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
-      var partner = partnerId ? root._findStudent(cls, partnerId) : null
       seen[s.id] = true
-      if (partnerId) seen[partnerId] = true
-      var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
+      root._evalGroupIdsOf(cls, s.id, gridId).forEach(function(m) { seen[m] = true })
+      var label = root._evalGroupLabelOf(cls, s.id, gridId)
       var entry = root._evalEntryOf(s, gridId)
       var note = (entry && entry.absent) ? "ABS" : root.evalNoteOf(grid, entry, weights)
       var tiers = (entry && entry.tiersTemps && !entry.absent) ? "oui" : ""
@@ -5294,12 +5644,10 @@ Item {
     var entries = []
     sorted.forEach(function(s) {
       if (seen[s.id]) return
-      var partnerId = root._evalPartnerIdOf(cls, s.id, gridId)
-      var partner = partnerId ? root._findStudent(cls, partnerId) : null
       seen[s.id] = true
-      if (partnerId) seen[partnerId] = true
+      root._evalGroupIdsOf(cls, s.id, gridId).forEach(function(m) { seen[m] = true })
       if (root.evaluationStudentAbsent(s) || !root.evaluationStudentDone(s)) return
-      var label = Store.studentLabel(s) + (partner ? " / " + Store.studentLabel(partner) : "")
+      var label = root._evalGroupLabelOf(cls, s.id, gridId)
       var entry = root._evalEntryOf(s, gridId)
       var note = root.evalNoteOf(grid, entry, weights)
       entries.push({ studentLabel: label, payload: { checks: entry ? entry.checks : {}, appreciation: entry ? entry.appreciation : "", comments: entry ? (entry.comments || []) : [], note: note, noteBase: root.evalNoteBaseOf(grid, entry, weights) } })
@@ -5463,7 +5811,7 @@ Item {
         id: keyCatcher
         anchors.fill: parent
         blocked: methodeField.activeFocus || contenuField.activeFocus || expressionField.activeFocus
-          || travailField.activeFocus || comportementField.activeFocus || axeField.activeFocus
+          || root.bulletinFocusOwner !== ""
           || correctionTitleField.activeFocus || correctionFolderField.activeFocus
           || evalTemplateSaveField.activeFocus
           || methodeCritereField.activeFocus || contenuCritereField.activeFocus || langueCritereField.activeFocus
@@ -5680,6 +6028,7 @@ Item {
                     : root.pathBarMode === "exportEvalGradesCsv" ? "Exporter les notes de la classe (.csv) vers :"
                     : root.pathBarMode === "exportClassEvalPdf" ? "Exporter les fiches corrigées (.pdf) vers :"
                     : root.pathBarMode === "exportQuestionnaireCsv" ? "Exporter les notes du questionnaire (.csv) vers :"
+                    : root.pathBarMode === "exportBulletinCsv" ? "Exporter les appréciations (.csv) vers :"
                     : root.pathBarMode === "exportQuestionnaireClassPdf" ? "Exporter toutes les grilles corrigées (.pdf) vers :"
                     : root.pathBarMode === "exportCompetencyCsv" ? "Exporter les notes (.csv) vers :"
                     : root.pathBarMode === "exportCompetencyClassPdf" ? "Exporter toutes les grilles corrigées (.pdf) vers :"
@@ -6245,240 +6594,443 @@ Item {
                   }
                 }
 
+                // ---- Bulletin : un tableau pour toute la classe ----
                 Column {
+                  id: bulletinPane
                   visible: root.appreciationMode === "bulletin"
                   width: parent.width
                   spacing: Style.spacing.md
 
-                  Column {
+                  readonly property real colGap: Style.space(6)
+                  readonly property real refreshW: Style.space(44)
+                  readonly property real avail: width - refreshW - colGap * 5
+                  readonly property real nameW: avail * 0.13
+                  readonly property real fieldW: avail * 0.215
+                  readonly property real apprW: avail * 0.225
+
+                  Flow {
                     width: parent.width
-                    spacing: Style.spacing.xxs
-                    Text { text: "Travail"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-                    Rectangle {
-                      width: parent.width
-                      height: Style.space(76)
-                      radius: Style.cornerRadius
-                      color: Style.normalFillFor(root.foreground, root.accent)
-                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-                      border.width: 1
-                      TextArea {
-                        id: travailField
-                        anchors.fill: parent
-                        anchors.margins: Style.space(6)
-                        wrapMode: TextArea.Wrap
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        background: null
-                        placeholderText: "Consigne sur le travail…"
-                      }
-                    }
-                  }
+                    spacing: Style.spacing.huge
 
-                  Column {
-                    width: parent.width
-                    spacing: Style.spacing.xxs
-                    Text { text: "Comportement"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-                    Rectangle {
-                      width: parent.width
-                      height: Style.space(76)
-                      radius: Style.cornerRadius
-                      color: Style.normalFillFor(root.foreground, root.accent)
-                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-                      border.width: 1
-                      TextArea {
-                        id: comportementField
-                        anchors.fill: parent
-                        anchors.margins: Style.space(6)
-                        wrapMode: TextArea.Wrap
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        background: null
-                        placeholderText: "Consigne sur le comportement…"
-                      }
-                    }
-                  }
-
-                  Column {
-                    width: parent.width
-                    spacing: Style.spacing.xxs
-                    Text { text: "Axe de progression"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
-                    Rectangle {
-                      width: parent.width
-                      height: Style.space(76)
-                      radius: Style.cornerRadius
-                      color: Style.normalFillFor(root.foreground, root.accent)
-                      border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
-                      border.width: 1
-                      TextArea {
-                        id: axeField
-                        anchors.fill: parent
-                        anchors.margins: Style.space(6)
-                        wrapMode: TextArea.Wrap
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.body
-                        background: null
-                        placeholderText: "Consigne sur l'axe de progression…"
-                      }
-                    }
-                  }
-                }
-
-                Flow {
-                  width: parent.width
-                  spacing: Style.spacing.huge
-
-                  Dropdown {
-                    id: maxCharsDropdown
-                    label: "Longueur max"
-                    options: [
-                      { value: "100", label: "100 caractères" },
-                      { value: "120", label: "120 caractères" },
-                      { value: "140", label: "140 caractères" },
-                      { value: "160", label: "160 caractères" },
-                      { value: "200", label: "200 caractères" },
-                      { value: "300", label: "300 caractères" },
-                      { value: "500", label: "500 caractères" },
-                      { value: "800", label: "800 caractères" },
-                      { value: "1000", label: "1000 caractères" }
-                    ]
-                    value: root.maxCharsOption
-                    foreground: root.foreground
-                    background: root.background
-                    accent: root.accent
-                    fontFamily: root.fontFamily
-                    onChanged: function(value) { root.maxCharsOption = value }
-                  }
-
-                  // Wrapped in an Item matching the dropdown's full height
-                  // (label + gap + control) and anchored to its bottom, so
-                  // this button's box lines up with the dropdown's actual
-                  // trigger control rather than its label row — a bare Flow
-                  // top-aligns mismatched-height children, which is what
-                  // made these buttons sit visibly too high before.
-                  Item {
-                    width: generateButton.implicitWidth
-                    height: maxCharsDropdown.implicitHeight
-                    Button {
-                      id: generateButton
-                      anchors.bottom: parent.bottom
-                      text: root.generatingAppreciation ? "Génération en cours…" : "🪄 Générer l'appréciation"
-                      bordered: true
-                      enabled: !root.generatingAppreciation
+                    Dropdown {
+                      id: bulletinMaxCharsDropdown
+                      label: "Longueur max"
+                      options: [
+                        { value: "100", label: "100 caractères" },
+                        { value: "120", label: "120 caractères" },
+                        { value: "140", label: "140 caractères" },
+                        { value: "160", label: "160 caractères" },
+                        { value: "200", label: "200 caractères" },
+                        { value: "300", label: "300 caractères" },
+                        { value: "500", label: "500 caractères" },
+                        { value: "800", label: "800 caractères" },
+                        { value: "1000", label: "1000 caractères" }
+                      ]
+                      value: root.bulletinState.maxChars
                       foreground: root.foreground
+                      background: root.background
                       accent: root.accent
-                      onClicked: root.generateAppreciation()
+                      fontFamily: root.fontFamily
+                      onChanged: function(value) { root.bulletinSetMaxChars(value) }
                     }
-                  }
 
-                  Item {
-                    width: newAppreciationButton.implicitWidth
-                    height: maxCharsDropdown.implicitHeight
-                    Button {
-                      id: newAppreciationButton
-                      anchors.bottom: parent.bottom
-                      text: "🆕 Nouvelle appréciation"
-                      bordered: true
+                    Dropdown {
+                      label: "Modèle"
+                      options: [{ value: "sonnet", label: "Sonnet" }, { value: "opus", label: "Opus" }]
+                      value: root.bulletinState.model
                       foreground: root.foreground
+                      background: root.background
                       accent: root.accent
-                      onClicked: root.resetAppreciationForm()
+                      fontFamily: root.fontFamily
+                      onChanged: function(value) { root.bulletinSetModel(value) }
+                    }
+
+                    Item {
+                      width: bulletinGenerateButton.implicitWidth
+                      height: bulletinMaxCharsDropdown.implicitHeight
+                      Button {
+                        id: bulletinGenerateButton
+                        anchors.bottom: parent.bottom
+                        text: root.bulletinGeneratingClass ? "Génération en cours…" : "🪄 Générer la classe"
+                        bordered: true
+                        enabled: !root.bulletinBusy
+                        foreground: root.foreground
+                        accent: root.accent
+                        onClicked: root.bulletinGenerateClass()
+                      }
+                    }
+
+                    Item {
+                      width: bulletinCopyButton.implicitWidth
+                      height: bulletinMaxCharsDropdown.implicitHeight
+                      Button {
+                        id: bulletinCopyButton
+                        anchors.bottom: parent.bottom
+                        text: "📋 Copier tout"
+                        bordered: true
+                        foreground: root.foreground
+                        accent: root.accent
+                        onClicked: root.bulletinCopyAll()
+                      }
+                    }
+
+                    Item {
+                      width: bulletinCsvButton.implicitWidth
+                      height: bulletinMaxCharsDropdown.implicitHeight
+                      Button {
+                        id: bulletinCsvButton
+                        anchors.bottom: parent.bottom
+                        text: "📄 Exporter en CSV"
+                        bordered: true
+                        foreground: root.foreground
+                        accent: root.accent
+                        onClicked: root.exportBulletinCsv()
+                      }
+                    }
+
+                    Item {
+                      width: bulletinClearButton.implicitWidth
+                      height: bulletinMaxCharsDropdown.implicitHeight
+                      Button {
+                        id: bulletinClearButton
+                        anchors.bottom: parent.bottom
+                        property bool confirming: false
+                        text: confirming ? "Confirmer : tout effacer ?" : "🆕 Nouvelle série"
+                        bordered: true
+                        enabled: !root.bulletinBusy
+                        foreground: confirming ? Color.urgent : root.foreground
+                        accent: root.accent
+                        onClicked: {
+                          if (!confirming) { confirming = true; bulletinClearConfirmTimer.restart(); return }
+                          confirming = false
+                          root.bulletinClearAll()
+                        }
+                        Timer { id: bulletinClearConfirmTimer; interval: 4000; onTriggered: bulletinClearButton.confirming = false }
+                      }
                     }
                   }
-                }
-
-                Text {
-                  visible: root.appreciationError !== ""
-                  width: parent.width
-                  text: root.appreciationError
-                  color: Color.urgent
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  wrapMode: Text.WordWrap
-                  textFormat: Text.PlainText
-                }
-
-                Column {
-                  visible: root.appreciationResult !== ""
-                  width: parent.width
-                  spacing: Style.spacing.sm
 
                   Text {
-                    text: "Résultat"
-                    color: root.foreground
+                    visible: root.bulletinError !== ""
+                    width: parent.width
+                    text: root.bulletinError
+                    color: Color.urgent
                     font.family: root.fontFamily
-                    font.pixelSize: Style.font.title
-                    font.bold: true
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
                   }
-
-                  Rectangle {
-                    width: parent.width
-                    height: resultText.implicitHeight + Style.space(16)
-                    radius: Style.cornerRadius
-                    color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.06)
-                    border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.35)
-                    border.width: 1
-
-                    Text {
-                      id: resultText
-                      anchors.left: parent.left
-                      anchors.right: parent.right
-                      anchors.top: parent.top
-                      anchors.margins: Style.space(10)
-                      text: root.appreciationResult
-                      color: root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      wrapMode: Text.WordWrap
-                      textFormat: Text.PlainText
-                    }
-                  }
-
-                  Row {
-                    spacing: Style.spacing.controlGap
-
-                    Text {
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: root.appreciationResult.length + " / " + root.maxCharsOption + " caractères"
-                      color: Qt.darker(root.foreground, 1.4)
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                    Button {
-                      text: "📋 Copier"
-                      bordered: true
-                      foreground: root.foreground
-                      accent: root.accent
-                      onClicked: root.copyAppreciation()
-                    }
-                    Button {
-                      visible: root.appreciationMode === "copies"
-                      text: "🏷 Ajouter à la planche d'étiquettes"
-                      bordered: true
-                      foreground: root.foreground
-                      accent: root.accent
-                      tooltipText: "Bientôt disponible — en attente du gabarit d'étiquettes"
-                      onClicked: root.addAppreciationToLabelSheet()
-                    }
-                    Text {
-                      anchors.verticalCenter: parent.verticalCenter
-                      visible: root.appreciationCopyFeedback !== ""
-                      text: root.appreciationCopyFeedback
-                      color: Qt.darker(root.foreground, 1.3)
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                  }
-
                   Text {
-                    visible: root.labelSheetFeedback !== ""
+                    visible: root.bulletinMessage !== ""
                     width: parent.width
-                    text: root.labelSheetFeedback
+                    text: root.bulletinMessage
                     color: Qt.darker(root.foreground, 1.3)
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
                     wrapMode: Text.WordWrap
+                  }
+
+                  // header
+                  Row {
+                    spacing: bulletinPane.colGap
+                    Text { width: bulletinPane.nameW; text: "Élève"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                    Text { width: bulletinPane.fieldW; text: "Travail"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                    Text { width: bulletinPane.fieldW; text: "Comportement"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                    Text { width: bulletinPane.fieldW; text: "Axe de progression"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                    Text { width: bulletinPane.apprW; text: "Appréciation"; color: Qt.darker(root.foreground, 1.4); font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+                  }
+
+                  Repeater {
+                    model: root.activeClass() ? root.activeClass().students : []
+
+                    Row {
+                      id: bRow
+                      required property var modelData
+                      readonly property string sid: modelData.id
+                      property int rev: root.bulletinRev
+                      // Tallest of the four editable cells decides the row height, so no text
+      // is ever cut off. Appréciation also needs room for its counter line.
+      property real h0: 0
+      property real h1: 0
+      property real h2: 0
+      readonly property real rowH: Math.max(Style.space(76), h0, h1, h2,
+        apprArea.contentHeight + apprArea.topPadding + apprArea.bottomPadding + counterText.implicitHeight + Style.space(18))
+                      spacing: bulletinPane.colGap
+
+                      Text {
+                        width: bulletinPane.nameW
+                        height: bRow.rowH
+                        verticalAlignment: Text.AlignVCenter
+                        text: Store.studentLabel(bRow.modelData)
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        wrapMode: Text.WordWrap
+                      }
+
+                      Repeater {
+                        model: [
+                          { key: "travail", ph: "Travail…", idx: 0 },
+                          { key: "comportement", ph: "Comportement…", idx: 1 },
+                          { key: "axe", ph: "Axe de progression…", idx: 2 }
+                        ]
+                        Rectangle {
+                          required property var modelData
+                          width: bulletinPane.fieldW
+                          height: bRow.rowH
+                          radius: Style.cornerRadius
+                          color: Style.normalFillFor(root.foreground, root.accent)
+                          border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                          border.width: 1
+                          TextArea {
+                            anchors.fill: parent
+                            anchors.margins: Style.space(6)
+                            wrapMode: TextArea.Wrap
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                            background: null
+                            placeholderText: modelData.ph
+                            text: { bRow.rev; return root.bulletinGet(bRow.sid, modelData.key) }
+                            onTextChanged: root.bulletinSet(bRow.sid, modelData.key, text)
+                            onContentHeightChanged: bRow["h" + modelData.idx] = contentHeight + topPadding + bottomPadding + Style.space(14)
+                            Component.onCompleted: bRow["h" + modelData.idx] = contentHeight + topPadding + bottomPadding + Style.space(14)
+                            onActiveFocusChanged: {
+                              var me = bRow.sid + ":" + modelData.key
+                              if (activeFocus) root.bulletinFocusOwner = me
+                              else if (root.bulletinFocusOwner === me) root.bulletinFocusOwner = ""
+                            }
+                          }
+                        }
+                      }
+
+                      Rectangle {
+                        width: bulletinPane.apprW
+                        height: bRow.rowH
+                        radius: Style.cornerRadius
+                        color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.06)
+                        border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.35)
+                        border.width: 1
+                        TextArea {
+                          id: apprArea
+                          anchors.left: parent.left
+                          anchors.right: parent.right
+                          anchors.top: parent.top
+                          anchors.bottom: counterText.top
+                          anchors.margins: Style.space(6)
+                          wrapMode: TextArea.Wrap
+                          color: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          background: null
+                          placeholderText: root.bulletinGeneratingClass || root.bulletinGeneratingStudentId === bRow.sid ? "…" : ""
+                          text: { bRow.rev; return root.bulletinGet(bRow.sid, "text") }
+                          onTextChanged: root.bulletinSet(bRow.sid, "text", text)
+                          onActiveFocusChanged: {
+                            var me = bRow.sid + ":text"
+                            if (activeFocus) root.bulletinFocusOwner = me
+                            else if (root.bulletinFocusOwner === me) root.bulletinFocusOwner = ""
+                          }
+                        }
+                        Text {
+                          id: counterText
+                          anchors.right: parent.right
+                          anchors.bottom: parent.bottom
+                          anchors.margins: Style.space(4)
+                          text: (root.bulletinRowLocked(bRow.sid) ? "🔒 " : "") + apprArea.text.length + " / " + root.bulletinState.maxChars
+                          color: apprArea.text.length > parseInt(root.bulletinState.maxChars, 10) ? Color.urgent : Qt.darker(root.foreground, 1.6)
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
+                      }
+
+                      Item {
+                        width: bulletinPane.refreshW
+                        height: bRow.rowH
+                        Column {
+                          anchors.verticalCenter: parent.verticalCenter
+                          spacing: Style.space(4)
+                          Button {
+                            text: root.bulletinGeneratingStudentId === bRow.sid ? "…" : "↻"
+                            bordered: true
+                            enabled: !root.bulletinBusy
+                            foreground: root.foreground
+                            accent: root.accent
+                            tooltipText: "Refaire l'appréciation de cet élève"
+                            onClicked: root.bulletinGenerateStudent(bRow.sid)
+                          }
+                          Button {
+                            text: "📋"
+                            bordered: true
+                            foreground: root.foreground
+                            accent: root.accent
+                            tooltipText: "Copier cette appréciation"
+                            onClicked: root.bulletinCopyStudent(bRow.sid)
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                Column {
+                  visible: root.appreciationMode === "copies"
+                  width: parent.width
+                  spacing: Style.spacing.huge
+
+                  Flow {
+                    width: parent.width
+                    spacing: Style.spacing.huge
+
+                    Dropdown {
+                      id: maxCharsDropdown
+                      label: "Longueur max"
+                      options: [
+                        { value: "100", label: "100 caractères" },
+                        { value: "120", label: "120 caractères" },
+                        { value: "140", label: "140 caractères" },
+                        { value: "160", label: "160 caractères" },
+                        { value: "200", label: "200 caractères" },
+                        { value: "300", label: "300 caractères" },
+                        { value: "500", label: "500 caractères" },
+                        { value: "800", label: "800 caractères" },
+                        { value: "1000", label: "1000 caractères" }
+                      ]
+                      value: root.maxCharsOption
+                      foreground: root.foreground
+                      background: root.background
+                      accent: root.accent
+                      fontFamily: root.fontFamily
+                      onChanged: function(value) { root.maxCharsOption = value }
+                    }
+
+                    // Wrapped in an Item matching the dropdown's full height
+                    // (label + gap + control) and anchored to its bottom, so
+                    // this button's box lines up with the dropdown's actual
+                    // trigger control rather than its label row — a bare Flow
+                    // top-aligns mismatched-height children, which is what
+                    // made these buttons sit visibly too high before.
+                    Item {
+                      width: generateButton.implicitWidth
+                      height: maxCharsDropdown.implicitHeight
+                      Button {
+                        id: generateButton
+                        anchors.bottom: parent.bottom
+                        text: root.generatingAppreciation ? "Génération en cours…" : "🪄 Générer l'appréciation"
+                        bordered: true
+                        enabled: !root.generatingAppreciation
+                        foreground: root.foreground
+                        accent: root.accent
+                        onClicked: root.generateAppreciation()
+                      }
+                    }
+
+                    Item {
+                      width: newAppreciationButton.implicitWidth
+                      height: maxCharsDropdown.implicitHeight
+                      Button {
+                        id: newAppreciationButton
+                        anchors.bottom: parent.bottom
+                        text: "🆕 Nouvelle appréciation"
+                        bordered: true
+                        foreground: root.foreground
+                        accent: root.accent
+                        onClicked: root.resetAppreciationForm()
+                      }
+                    }
+                  }
+
+                  Text {
+                    visible: root.appreciationError !== ""
+                    width: parent.width
+                    text: root.appreciationError
+                    color: Color.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                  }
+
+                  Column {
+                    visible: root.appreciationResult !== ""
+                    width: parent.width
+                    spacing: Style.spacing.sm
+
+                    Text {
+                      text: "Résultat"
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.title
+                      font.bold: true
+                    }
+
+                    Rectangle {
+                      width: parent.width
+                      height: resultText.implicitHeight + Style.space(16)
+                      radius: Style.cornerRadius
+                      color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.06)
+                      border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.35)
+                      border.width: 1
+
+                      Text {
+                        id: resultText
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.top: parent.top
+                        anchors.margins: Style.space(10)
+                        text: root.appreciationResult
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        wrapMode: Text.WordWrap
+                        textFormat: Text.PlainText
+                      }
+                    }
+
+                    Row {
+                      spacing: Style.spacing.controlGap
+
+                      Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.appreciationResult.length + " / " + root.maxCharsOption + " caractères"
+                        color: Qt.darker(root.foreground, 1.4)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                      Button {
+                        text: "📋 Copier"
+                        bordered: true
+                        foreground: root.foreground
+                        accent: root.accent
+                        onClicked: root.copyAppreciation()
+                      }
+                      Button {
+                        visible: root.appreciationMode === "copies"
+                        text: "🏷 Ajouter à la planche d'étiquettes"
+                        bordered: true
+                        foreground: root.foreground
+                        accent: root.accent
+                        tooltipText: "Bientôt disponible — en attente du gabarit d'étiquettes"
+                        onClicked: root.addAppreciationToLabelSheet()
+                      }
+                      Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.appreciationCopyFeedback !== ""
+                        text: root.appreciationCopyFeedback
+                        color: Qt.darker(root.foreground, 1.3)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+
+                    Text {
+                      visible: root.labelSheetFeedback !== ""
+                      width: parent.width
+                      text: root.labelSheetFeedback
+                      color: Qt.darker(root.foreground, 1.3)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      wrapMode: Text.WordWrap
+                    }
                   }
                 }
               }
@@ -8044,23 +8596,39 @@ Item {
                     }
                   }
 
-                  // Binôme (Gabriel, 2026-10-06) — see evaluationPartnerOptions().
+                  // Groupe (Gabriel, 2026-10-06 as "Binôme", generalized 2026-11-15)
+                  // — see evaluationGroupAddOptions().
                   Dropdown {
+                    id: evaluationGroupAddDropdown
                     visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null
-                    label: "👥 Binôme"
-                    options: root.evaluationPartnerOptions()
-                    value: root.evaluationPartnerId()
+                    label: root.evaluationGroupIds().length ? "👥 Ajouter au groupe" : "👥 Mettre en groupe avec"
+                    options: root.evaluationGroupAddOptions()
+                    value: ""
                     foreground: root.foreground
                     background: root.background
                     accent: root.accent
                     fontFamily: root.fontFamily
-                    // Dropdown assigns `value` itself on pick, breaking the
-                    // binding — restore it so a canceled "Associer ?"
-                    // confirmation doesn't leave a pair displayed that
-                    // doesn't exist.
+                    // Dropdown assigns `value` itself on pick — restore it
+                    // so the list is ready for the next addition (and a
+                    // canceled "Associer ?" leaves nothing displayed).
                     onChanged: function(picked) {
-                      value = Qt.binding(function() { return root.evaluationPartnerId() })
-                      root.setEvaluationPartner(picked)
+                      value = Qt.binding(function() { return "" })
+                      root.addToEvaluationGroup(picked)
+                    }
+                  }
+
+                  Dropdown {
+                    visible: root.evaluationStudentId !== "" && root.activeEvaluationGrid() !== null && root.evaluationGroupIds().length > 0
+                    label: "👥 Retirer du groupe"
+                    options: root.evaluationGroupRemoveOptions()
+                    value: ""
+                    foreground: root.foreground
+                    background: root.background
+                    accent: root.accent
+                    fontFamily: root.fontFamily
+                    onChanged: function(picked) {
+                      value = Qt.binding(function() { return "" })
+                      root.removeFromEvaluationGroup(picked)
                     }
                   }
 
@@ -9321,7 +9889,7 @@ Item {
       ConfirmDialog {
         anchors.fill: parent
         opened: root.evaluationPairPendingId !== ""
-        message: "Associer " + (root.evaluationStudent() ? Store.studentLabel(root.evaluationStudent()) : "") + " et " + (root._findStudent(root.activeClass(), root.evaluationPairPendingId) ? Store.studentLabel(root._findStudent(root.activeClass(), root.evaluationPairPendingId)) : "") + " en binôme ? Ce second élève a déjà une évaluation \"" + (root.activeEvaluationGrid() ? root.activeEvaluationGrid().name : "") + "\" : elle sera remplacée par celle de " + (root.evaluationStudent() ? Store.studentLabel(root.evaluationStudent()) : "") + "."
+        message: "Associer " + (root.evaluationStudent() ? Store.studentLabel(root.evaluationStudent()) : "") + " et " + (root._findStudent(root.activeClass(), root.evaluationPairPendingId) ? Store.studentLabel(root._findStudent(root.activeClass(), root.evaluationPairPendingId)) : "") + " en groupe ? Cet élève a déjà une évaluation \"" + (root.activeEvaluationGrid() ? root.activeEvaluationGrid().name : "") + "\" : elle sera remplacée par celle de " + (root.evaluationStudent() ? Store.studentLabel(root.evaluationStudent()) : "") + "."
         cancelText: "Annuler"
         confirmText: "Associer"
         selectedIndex: 0

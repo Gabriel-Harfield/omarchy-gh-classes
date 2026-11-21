@@ -373,6 +373,42 @@ Item {
     onTriggered: root.syncInFlight = false
   }
 
+  // ---- chain stepping (Gabriel, 2026-11-21) ---------------------------
+  // The four files are synced one after the other. Each step used to chain
+  // into the next ONLY through its FileView's onSaved — but setText() emits
+  // no onSaved when the content is identical to what is already on disk, so
+  // the whole chain silently died at the first unchanged file (typically
+  // eval_templates.json, almost never modified): the comments bank and the
+  // bulletin table were practically never pushed. Now a step whose merged
+  // text equals what it just read from the sync folder skips the write and
+  // advances directly; a short fallback timer advances anyway if a write
+  // never reports back. _syncNext is cleared on use, so onSaved / timer /
+  // skip can race harmlessly (only the first one advances).
+  property var _syncNext: null
+
+  function syncAdvance() {
+    var next = root._syncNext
+    root._syncNext = null
+    syncAdvanceTimer.stop()
+    syncInFlightTimeout.restart()
+    if (next) next()
+  }
+
+  function syncWriteOrSkip(fileView, name, text, remoteText, next) {
+    fileView.path = root._syncPendingDir + "/" + name
+    root._syncNext = next
+    if (text === remoteText) { root.syncAdvance(); return }
+    syncAdvanceTimer.restart()
+    Qt.callLater(function() { fileView.setText(text) })
+  }
+
+  Timer {
+    id: syncAdvanceTimer
+    interval: 2500
+    repeat: false
+    onTriggered: root.syncAdvance()
+  }
+
   Process {
     id: ensureSyncDirProc
     onExited: function(exitCode) {
@@ -393,8 +429,7 @@ Item {
       var merged = Store.mergeClasses(root.classes, remoteClasses)
       root.classes = merged
       root.persistClasses()
-      syncWriteFile.path = root._syncPendingDir + "/classes.json"
-      Qt.callLater(function() { syncWriteFile.setText(Store.serializeClasses(merged)) })
+      root.syncWriteOrSkip(syncWriteFile, "classes.json", Store.serializeClasses(merged), syncReadOut.text || "", root.runTemplatesSync)
     }
   }
 
@@ -406,7 +441,7 @@ Item {
     // classes.json done → chain into eval_templates.json rather than
     // clearing syncInFlight here (see runTemplatesSync() below) — one
     // "sync" action now covers both files.
-    onSaved: root.runTemplatesSync()
+    onSaved: root.syncAdvance()
   }
 
   // ---- eval_templates.json sync — plain union by id (see
@@ -430,8 +465,7 @@ Item {
       var merged = EvalTemplatesStore.mergeTemplates(root.evalTemplates, remoteTemplates)
       root.evalTemplates = merged
       root.persistEvalTemplates()
-      syncTemplatesWriteFile.path = root._syncPendingDir + "/eval_templates.json"
-      Qt.callLater(function() { syncTemplatesWriteFile.setText(EvalTemplatesStore.serializeTemplates(merged)) })
+      root.syncWriteOrSkip(syncTemplatesWriteFile, "eval_templates.json", EvalTemplatesStore.serializeTemplates(merged), syncTemplatesReadOut.text || "", root.runCommentsBankSync)
     }
   }
 
@@ -443,7 +477,7 @@ Item {
     // eval_templates.json done → chain into eval_comments_bank.json rather
     // than clearing syncInFlight here, same convention as classes.json
     // chaining into this file above.
-    onSaved: root.runCommentsBankSync()
+    onSaved: root.syncAdvance()
   }
 
   // ---- eval_comments_bank.json sync — additive merge with tombstones (see
@@ -467,8 +501,7 @@ Item {
       var merged = CommentsBankStore.mergeBanks(root.evalCommentsBank, remoteBank, root.evalCommentsBankDeletedKeys)
       root.evalCommentsBank = merged
       root.persistEvalCommentsBank()
-      syncCommentsBankWriteFile.path = root._syncPendingDir + "/eval_comments_bank.json"
-      Qt.callLater(function() { syncCommentsBankWriteFile.setText(CommentsBankStore.serializeBank(merged)) })
+      root.syncWriteOrSkip(syncCommentsBankWriteFile, "eval_comments_bank.json", CommentsBankStore.serializeBank(merged), syncCommentsBankReadOut.text || "", root.runBulletinSync)
     }
   }
 
@@ -478,7 +511,7 @@ Item {
     atomicWrites: true
     printErrors: false
     // bank done → chain into bulletin-table.json (last step of the chain).
-    onSaved: root.runBulletinSync()
+    onSaved: root.syncAdvance()
   }
 
   // ---- bulletin-table.json sync — per-row last-write-wins (see
@@ -504,8 +537,7 @@ Item {
         root.bulletinRev++
         bulletinFile.setText(BulletinTable.serialize(merged))
       }
-      syncBulletinWriteFile.path = root._syncPendingDir + "/bulletin-table.json"
-      Qt.callLater(function() { syncBulletinWriteFile.setText(BulletinTable.serialize(merged)) })
+      root.syncWriteOrSkip(syncBulletinWriteFile, "bulletin-table.json", BulletinTable.serialize(merged), syncBulletinReadOut.text || "", root.syncChainDone)
     }
   }
 
@@ -514,8 +546,11 @@ Item {
     watchChanges: false
     atomicWrites: true
     printErrors: false
-    onSaved: { syncInFlightTimeout.stop(); root.syncInFlight = false }
+    onSaved: root.syncAdvance()
   }
+
+  // End of the chain: release the in-flight flag.
+  function syncChainDone() { syncInFlightTimeout.stop(); root.syncInFlight = false }
 
   function activeClass() {
     var found = Store.findClass(root.classes, root.activeClassId)
